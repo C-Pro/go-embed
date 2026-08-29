@@ -2,7 +2,6 @@ package engine_test
 
 import (
 	"math"
-	"path/filepath"
 	"testing"
 
 	"go-embed/pkg/engine"
@@ -38,18 +37,8 @@ func TestQuantizeMatrix(t *testing.T) {
 }
 
 func TestQuantizedParityAgainstFP32(t *testing.T) {
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
-
-	fp32Eng, err := engine.New(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load FP32 engine: %v", err)
-	}
-
-	int8Eng, err := engine.NewQuantized(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load INT8 engine: %v", err)
-	}
+	fp32Eng := loadTestModel(t)
+	int8Eng := loadTestINT8Model(t)
 
 	if !int8Eng.IsQuantized() {
 		t.Fatal("Expected INT8 engine to be quantized")
@@ -85,13 +74,7 @@ func TestQuantizedParityAgainstFP32(t *testing.T) {
 }
 
 func TestQuantizedZeroAllocations(t *testing.T) {
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
-
-	eng, err := engine.NewQuantized(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load INT8 engine: %v", err)
-	}
+	eng := loadTestINT8Model(t)
 
 	ctx := engine.NewContext(eng.Model())
 	out := make([]float32, engine.HiddenSize)
@@ -102,7 +85,12 @@ func TestQuantizedZeroAllocations(t *testing.T) {
 		t.Fatalf("Warmup failed: %v", err)
 	}
 
-	allocs := testing.AllocsPerRun(100, func() {
+	allocIters := 100
+	if isCI() {
+		allocIters = 2
+	}
+
+	allocs := testing.AllocsPerRun(allocIters, func() {
 		if _, err := ctx.Embed(query, out); err != nil {
 			t.Fatalf("Embed error: %v", err)
 		}

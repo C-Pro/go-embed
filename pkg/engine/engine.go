@@ -143,6 +143,14 @@ func NewQuantized(modelPath, tokenizerPath string) (*Engine, error) {
 	return NewEngine(WithModelPath(modelPath, tokenizerPath), WithINT8())
 }
 
+// NewWithModel creates an Engine directly from an existing pre-loaded Model instance.
+func NewWithModel(m *Model) *Engine {
+	return &Engine{
+		model: m,
+		pool:  NewContextPool(m),
+	}
+}
+
 // NewWithOptions creates a new Engine with custom configuration options.
 func NewWithOptions(modelPath, tokenizerPath string, opts ...Option) (*Engine, error) {
 	allOpts := append([]Option{WithModelPath(modelPath, tokenizerPath)}, opts...)

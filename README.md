@@ -1,17 +1,19 @@
 # go-embed
 
-A high-performance, pure Go (CGO-free), CPU-only inference library for tokenization and text embedding generation. 
+[![CI](https://github.com/C-Pro/go-embed/actions/workflows/ci.yml/badge.svg)](https://github.com/C-Pro/go-embed/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/C-Pro/go-embed.svg)](https://pkg.go.dev/github.com/C-Pro/go-embed)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+A high-performance, pure Go (CGO-free), CPU-only inference library for tokenization and text embedding generation with **zero external dependencies**.
 
 `go-embed` natively executes [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) (XLM-RoBERTa architecture: 12 layers, hidden dimension 384, 12 attention heads, 1536 intermediate size, ~250k vocabulary) with exact numerical parity to PyTorch/Hugging Face Transformers.
-
-> [!NOTE]
-> This library is based on and inspired by [`github.com/nlpodyssey/spago`](https://github.com/nlpodyssey/spago), re-engineered into a lightweight, standalone, zero-allocation runtime optimized for CPU inference with Go 1.27 hardware vector acceleration (SIMD).
 
 ---
 
 ## Key Features
 
-- **Pure Go / CGO-Free:** Zero external C/C++ libraries, BLAS/LAPACK binaries, or Python runtimes required. Cross-compiles to any Go-supported platform out of the box.
+- **Zero Dependencies / Pure Go:** Zero third-party dependencies — built entirely on the Go standard library.
+- **CGO-Free:** Zero external C/C++ libraries, BLAS/LAPACK binaries, or Python runtimes required. Cross-compiles to any Go-supported platform out of the box.
 - **Multiple Precision Modes:**
   - **FP32 Full Precision (Default):** Maximum compute performance (`~54 ms` short query latency, 449 MB RAM).
   - **BFloat16 (BF16):** Native 16-bit float weights reduce RAM to **225 MB (2× reduction)** with $>99.999\%$ fidelity and zero scaling overhead.
@@ -20,7 +22,7 @@ A high-performance, pure Go (CGO-free), CPU-only inference library for tokenizat
 - **Hardware Acceleration via Go 1.27 SIMD:** Leverages Go 1.27's standard `simd.Float32s` with 8-way unrolled fused multiply-add (`MulAdd`), vectorized LayerNorm, fast GELU, and cosine similarity. Includes portable scalar fallback when compiled without SIMD flags.
 - **Exact Numerical Parity:** Validated against PyTorch reference outputs with Cosine Similarity $\ge 0.999999$ across short queries, full sentences, code snippets, empty strings, and 512-token max-length sequences.
 - **Cross-Lingual Support:** Supports 100+ languages (English, Russian, Indonesian, German, Chinese, etc.) with semantic consistency $\ge 0.80$ across language pairs.
-- **Built-in Tokenizer & Safetensors Loader:** Includes a pure Go SentencePiece/Unigram tokenizer (with NFKC normalization and Viterbi DP search) and `.safetensors` weight loader with zero external dependencies.
+- **Built-in Tokenizer & Safetensors Loader:** Includes a pure Go SentencePiece/Unigram tokenizer (with NFKC normalization and Viterbi DP search) and `.safetensors` weight loader.
 
 ---
 
@@ -36,7 +38,6 @@ A high-performance, pure Go (CGO-free), CPU-only inference library for tokenizat
 | **Long Sequence ($L=512$)** | **FP32** | 449 MB | **`5.57 s`** | **`0 B / 0 allocs`** | 100% (Baseline) |
 | **Long Sequence ($L=512$)** | **BF16** | **225 MB** *(2×)* | **`5.89 s`** | **`0 B / 0 allocs`** | **`0.999996`** |
 | **Long Sequence ($L=512$)** | **INT8** | **125 MB** *(3.6×)* | `15.50 s` | **`0 B / 0 allocs`** | `0.999787` |
-| *Spago Baseline ($L=512$)* | *FP32* | *>30 GB (OOM risk)* | *~3.5+ min* | *100M+ allocs* | Baseline |
 
 ---
 
@@ -311,8 +312,7 @@ GOEXPERIMENT=simd go test -run=^$ -bench=. -benchmem ./pkg/engine
 │   │   ├── model.go        # Contiguous model parameter layouts & safetensors loader
 │   │   └── engine.go       # High-level ergonomic API (NewEngine with functional options)
 │   ├── safetensors/        # Pure Go .safetensors binary reader and parser
-│   ├── tokenizer/          # Pure Go SentencePiece/Unigram tokenizer & Viterbi search
-│   └── spagoref/           # Spago reference baseline harness for parity testing
+│   └── tokenizer/          # Pure Go SentencePiece/Unigram tokenizer & Viterbi search
 └── testdata/
     └── golden.json         # 26 PyTorch/Transformers ground truth vectors
 ```

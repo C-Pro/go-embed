@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"go-embed/pkg/engine"
-	"go-embed/pkg/spagoref"
 )
 
 func makeDummyText(targetLen int) string {
@@ -17,7 +16,7 @@ func makeDummyText(targetLen int) string {
 	return "passage: " + res
 }
 
-// BenchmarkComparative benchmarks Spago Baseline vs Pure Go Scalar vs Pure Go SIMD.
+// BenchmarkComparative benchmarks Pure Go Scalar vs Pure Go SIMD across FP32, BF16, and INT8.
 func BenchmarkComparative(b *testing.B) {
 	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
 	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
@@ -34,25 +33,7 @@ func BenchmarkComparative(b *testing.B) {
 		toks, _ := eng.Model().Tok.Encode(txt, l)
 		actualLen := len(toks)
 
-		// 1. Spago Baseline (only L <= 128 due to extreme memory overhead of dynamic computation graphs)
-		if actualLen <= 128 {
-			b.Run(fmt.Sprintf("Spago/L=%d", actualLen), func(b *testing.B) {
-				spagoModel, err := spagoref.LoadModel(modelPath, tokPath)
-				if err != nil {
-					b.Fatalf("Failed to load spago model: %v", err)
-				}
-				b.ResetTimer()
-				b.ReportAllocs()
-
-				for i := 0; i < b.N; i++ {
-					if _, err := spagoModel.EncodeTokenIDs(toks); err != nil {
-						b.Fatalf("Spago encode failed: %v", err)
-					}
-				}
-			})
-		}
-
-		// 2. Pure Go Scalar Engine (Zero-Allocation Context)
+		// 1. Pure Go Scalar Engine (Zero-Allocation Context)
 		b.Run(fmt.Sprintf("ScalarEngine/L=%d", actualLen), func(b *testing.B) {
 			ctx := engine.NewContext(eng.Model())
 			ctx.UseSIMD = false

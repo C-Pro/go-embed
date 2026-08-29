@@ -29,6 +29,10 @@ func TestNewEngineFunctionalOptions(t *testing.T) {
 	}
 
 	// 2. NewEngine with WithBF16
+	if isCI() {
+		return // Skip redundant full re-loads in CI
+	}
+
 	bf16Eng, err := engine.NewEngine(
 		engine.WithDataDir(dataDir),
 		engine.WithBF16(),

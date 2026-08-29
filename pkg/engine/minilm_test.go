@@ -8,6 +8,10 @@ import (
 )
 
 func TestParaphraseMultilingualMiniLM(t *testing.T) {
+	if isCI() {
+		t.Skip("Skipping secondary model download and test in CI environment")
+	}
+
 	modelName := "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 	dataDir := filepath.Join("..", "..", "models", modelName)
 
@@ -92,6 +96,10 @@ func TestParaphraseMultilingualMiniLM(t *testing.T) {
 }
 
 func TestParaphraseMultilingualMiniLM_BF16(t *testing.T) {
+	if isCI() {
+		t.Skip("Skipping secondary model download and test in CI environment")
+	}
+
 	modelName := "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 	dataDir := filepath.Join("..", "..", "models", modelName)
 

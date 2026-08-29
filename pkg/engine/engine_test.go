@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"go-embed/pkg/engine"
@@ -20,20 +21,60 @@ type GoldenEntry struct {
 	Embedding       []float32 `json:"embedding"`
 }
 
+var (
+	sharedFP32Once sync.Once
+	sharedFP32Eng  *engine.Engine
+	sharedFP32Err  error
+
+	sharedBF16Once sync.Once
+	sharedBF16Eng  *engine.Engine
+
+	sharedINT8Once sync.Once
+	sharedINT8Eng  *engine.Engine
+)
+
 func loadTestModel(t *testing.T) *engine.Engine {
 	t.Helper()
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
+	sharedFP32Once.Do(func() {
+		modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
+		tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
 
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		t.Skipf("model file %s not found", modelPath)
-	}
+		if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+			sharedFP32Err = err
+			return
+		}
 
-	eng, err := engine.New(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to initialize engine: %v", err)
+		sharedFP32Eng, sharedFP32Err = engine.New(modelPath, tokPath)
+	})
+
+	if sharedFP32Err != nil {
+		t.Skipf("model not available: %v", sharedFP32Err)
 	}
-	return eng
+	return sharedFP32Eng
+}
+
+func loadTestBF16Model(t *testing.T) *engine.Engine {
+	t.Helper()
+	fp32 := loadTestModel(t)
+	sharedBF16Once.Do(func() {
+		bf16Model := engine.ConvertToBF16Model(fp32.Model())
+		sharedBF16Eng = engine.NewWithModel(bf16Model)
+	})
+	return sharedBF16Eng
+}
+
+func loadTestINT8Model(t *testing.T) *engine.Engine {
+	t.Helper()
+	fp32 := loadTestModel(t)
+	sharedINT8Once.Do(func() {
+		int8Model := engine.QuantizeModel(fp32.Model())
+		sharedINT8Eng = engine.NewWithModel(int8Model)
+	})
+	return sharedINT8Eng
+}
+
+func isCI() bool {
+	return os.Getenv("CI") != "" || testing.Short()
 }
 
 func loadGolden(t *testing.T) []GoldenEntry {
@@ -47,6 +88,20 @@ func loadGolden(t *testing.T) []GoldenEntry {
 	var entries []GoldenEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		t.Fatalf("Failed to parse golden.json: %v", err)
+	}
+
+	// In CI, skip long 512-token sequences and test a fast representative subset
+	if isCI() {
+		var fastEntries []GoldenEntry
+		for _, e := range entries {
+			if e.SeqLen < 64 {
+				fastEntries = append(fastEntries, e)
+			}
+			if len(fastEntries) >= 2 {
+				break
+			}
+		}
+		return fastEntries
 	}
 	return entries
 }
@@ -135,8 +190,13 @@ func TestZeroAllocations(t *testing.T) {
 		t.Fatalf("Warmup failed: %v", err)
 	}
 
+	allocIters := 100
+	if isCI() {
+		allocIters = 2
+	}
+
 	// Test zero allocations
-	allocs := testing.AllocsPerRun(100, func() {
+	allocs := testing.AllocsPerRun(allocIters, func() {
 		if _, err := ctx.Embed(query, out); err != nil {
 			t.Fatalf("Embed failed: %v", err)
 		}

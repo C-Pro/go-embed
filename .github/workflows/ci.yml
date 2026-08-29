@@ -64,6 +64,7 @@ jobs:
   test:
     name: Go Test Suite
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -76,10 +77,10 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
       - name: Run Tests (Scalar Portable Fallback)
         if: matrix.simd == false
-        run: go test -v -race -coverprofile=coverage.out ./pkg/safetensors ./pkg/tokenizer ./pkg/spagoref ./pkg/engine
+        run: go test -v -race -coverprofile=coverage.out ./pkg/safetensors ./pkg/tokenizer ./pkg/engine
       - name: Run Tests (Hardware SIMD Accelerated)
         if: matrix.simd == true
-        run: GOEXPERIMENT=simd go test -v ./pkg/safetensors ./pkg/tokenizer ./pkg/spagoref ./pkg/engine
+        run: GOEXPERIMENT=simd go test -v ./pkg/safetensors ./pkg/tokenizer ./pkg/engine
       - name: Upload coverage reports to Codecov
         if: matrix.simd == false
         uses: codecov/codecov-action@v4

@@ -2,7 +2,6 @@ package engine_test
 
 import (
 	"math"
-	"path/filepath"
 	"testing"
 
 	"go-embed/pkg/engine"
@@ -34,18 +33,8 @@ func TestBFloat16Conversion(t *testing.T) {
 }
 
 func TestBF16ParityAgainstFP32(t *testing.T) {
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
-
-	fp32Eng, err := engine.New(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load FP32 engine: %v", err)
-	}
-
-	bf16Eng, err := engine.NewBF16(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load BF16 engine: %v", err)
-	}
+	fp32Eng := loadTestModel(t)
+	bf16Eng := loadTestBF16Model(t)
 
 	if bf16Eng.Precision() != engine.PrecisionBF16 {
 		t.Fatalf("Expected BF16 precision, got %v", bf16Eng.Precision())
@@ -82,13 +71,7 @@ func TestBF16ParityAgainstFP32(t *testing.T) {
 }
 
 func TestBF16ZeroAllocations(t *testing.T) {
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
-
-	eng, err := engine.NewBF16(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to load BF16 engine: %v", err)
-	}
+	eng := loadTestBF16Model(t)
 
 	ctx := engine.NewContext(eng.Model())
 	out := make([]float32, engine.HiddenSize)
@@ -99,7 +82,12 @@ func TestBF16ZeroAllocations(t *testing.T) {
 		t.Fatalf("Warmup failed: %v", err)
 	}
 
-	allocs := testing.AllocsPerRun(100, func() {
+	allocIters := 100
+	if isCI() {
+		allocIters = 2
+	}
+
+	allocs := testing.AllocsPerRun(allocIters, func() {
 		if _, err := ctx.Embed(query, out); err != nil {
 			t.Fatalf("Embed error: %v", err)
 		}

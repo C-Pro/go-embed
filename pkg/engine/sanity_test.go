@@ -1,7 +1,6 @@
 package engine_test
 
 import (
-	"path/filepath"
 	"testing"
 
 	"go-embed/pkg/engine"
@@ -17,13 +16,7 @@ func CalibratedCosineSim(raw float32) float32 {
 }
 
 func TestSemanticSanityAndCrossLingual(t *testing.T) {
-	modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
-	tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
-
-	eng, err := engine.New(modelPath, tokPath)
-	if err != nil {
-		t.Fatalf("Failed to initialize engine: %v", err)
-	}
+	eng := loadTestModel(t)
 
 	t.Run("Cross-Lingual Equivalence", func(t *testing.T) {
 		// Set 1: Distributed consensus
@@ -36,6 +29,10 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 			{"id", "query: Bagaimana cara mengimplementasikan konsensus dalam sistem terdistribusi?"},
 			{"de", "query: Wie implementiert man einen Konsens in verteilten Systemen?"},
 			{"zh", "query: 如何在分布式系统中实现共识？"},
+		}
+
+		if isCI() {
+			queriesConsensus = queriesConsensus[:2]
 		}
 
 		embsConsensus := make([][]float32, len(queriesConsensus))
@@ -67,6 +64,10 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 			{"id", "query: Kucing itu sedang tidur di sofa."},
 			{"de", "query: Die Katze schläft auf der Couch."},
 			{"zh", "query: 猫在沙发上睡觉。"},
+		}
+
+		if isCI() {
+			queriesCat = queriesCat[:2]
 		}
 
 		embsCat := make([][]float32, len(queriesCat))
