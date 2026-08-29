@@ -22,7 +22,6 @@ func reduceSumFloat32s(v simd.Float32s) float32 {
 	return sum
 }
 
-
 // MatVecMulAddSIMD computes out = x * W^T + bias using SIMD vector FMA operations.
 // It unrolls 4 rows at a time to keep x in CPU registers and hide FMA latency across 4 independent vector accumulators.
 func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float32, inDim, outDim int) {
@@ -139,6 +138,200 @@ func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float
 	}
 }
 
+// MatVecMulAddINT8SIMD computes out = (x * W_int8^T) * scale + bias using SIMD vector FMA operations.
+func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []float32, out []float32, inDim, outDim int) {
+	vecLen := simd.BroadcastFloat32s(0).Len()
+	vecLimit := inDim - (inDim % vecLen)
+
+	var wBuf0, wBuf1, wBuf2, wBuf3 [64]float32
+
+	j := 0
+	for ; j <= outDim-4; j += 4 {
+		wRow0 := weight[j*inDim : (j+1)*inDim]
+		wRow1 := weight[(j+1)*inDim : (j+2)*inDim]
+		wRow2 := weight[(j+2)*inDim : (j+3)*inDim]
+		wRow3 := weight[(j+3)*inDim : (j+4)*inDim]
+
+		acc0 := simd.BroadcastFloat32s(0)
+		acc1 := simd.BroadcastFloat32s(0)
+		acc2 := simd.BroadcastFloat32s(0)
+		acc3 := simd.BroadcastFloat32s(0)
+
+		k := 0
+		for ; k < vecLimit; k += vecLen {
+			vx := simd.LoadFloat32s(x[k:])
+
+			for idx := 0; idx < vecLen; idx++ {
+				wBuf0[idx] = float32(wRow0[k+idx])
+				wBuf1[idx] = float32(wRow1[k+idx])
+				wBuf2[idx] = float32(wRow2[k+idx])
+				wBuf3[idx] = float32(wRow3[k+idx])
+			}
+
+			vw0 := simd.LoadFloat32s(wBuf0[:vecLen])
+			vw1 := simd.LoadFloat32s(wBuf1[:vecLen])
+			vw2 := simd.LoadFloat32s(wBuf2[:vecLen])
+			vw3 := simd.LoadFloat32s(wBuf3[:vecLen])
+
+			acc0 = vx.MulAdd(vw0, acc0)
+			acc1 = vx.MulAdd(vw1, acc1)
+			acc2 = vx.MulAdd(vw2, acc2)
+			acc3 = vx.MulAdd(vw3, acc3)
+		}
+
+		dot0 := reduceSumFloat32s(acc0)
+		dot1 := reduceSumFloat32s(acc1)
+		dot2 := reduceSumFloat32s(acc2)
+		dot3 := reduceSumFloat32s(acc3)
+
+		for ; k < inDim; k++ {
+			xk := x[k]
+			dot0 += xk * float32(wRow0[k])
+			dot1 += xk * float32(wRow1[k])
+			dot2 += xk * float32(wRow2[k])
+			dot3 += xk * float32(wRow3[k])
+		}
+
+		res0 := dot0 * scale[j]
+		res1 := dot1 * scale[j+1]
+		res2 := dot2 * scale[j+2]
+		res3 := dot3 * scale[j+3]
+
+		if bias != nil {
+			res0 += bias[j]
+			res1 += bias[j+1]
+			res2 += bias[j+2]
+			res3 += bias[j+3]
+		}
+
+		out[j] = res0
+		out[j+1] = res1
+		out[j+2] = res2
+		out[j+3] = res3
+	}
+
+	// Remaining rows
+	for ; j < outDim; j++ {
+		wRow := weight[j*inDim : (j+1)*inDim]
+		acc0 := simd.BroadcastFloat32s(0)
+		k := 0
+		for ; k < vecLimit; k += vecLen {
+			vx := simd.LoadFloat32s(x[k:])
+			for idx := 0; idx < vecLen; idx++ {
+				wBuf0[idx] = float32(wRow[k+idx])
+			}
+			vw := simd.LoadFloat32s(wBuf0[:vecLen])
+			acc0 = vx.MulAdd(vw, acc0)
+		}
+
+		dot := reduceSumFloat32s(acc0)
+		for ; k < inDim; k++ {
+			dot += x[k] * float32(wRow[k])
+		}
+
+		res := dot * scale[j]
+		if bias != nil {
+			res += bias[j]
+		}
+		out[j] = res
+	}
+}
+
+// MatVecMulAddBF16SIMD computes out = x * W_bf16^T + bias using SIMD vector FMA operations.
+func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []float32, inDim, outDim int) {
+	vecLen := simd.BroadcastFloat32s(0).Len()
+	vecLimit := inDim - (inDim % vecLen)
+
+	var wBuf0, wBuf1, wBuf2, wBuf3 [64]float32
+
+	j := 0
+	for ; j <= outDim-4; j += 4 {
+		wRow0 := weight[j*inDim : (j+1)*inDim]
+		wRow1 := weight[(j+1)*inDim : (j+2)*inDim]
+		wRow2 := weight[(j+2)*inDim : (j+3)*inDim]
+		wRow3 := weight[(j+3)*inDim : (j+4)*inDim]
+
+		var dot0, dot1, dot2, dot3 float32
+		if bias != nil {
+			dot0 = bias[j]
+			dot1 = bias[j+1]
+			dot2 = bias[j+2]
+			dot3 = bias[j+3]
+		}
+
+		acc0 := simd.BroadcastFloat32s(0)
+		acc1 := simd.BroadcastFloat32s(0)
+		acc2 := simd.BroadcastFloat32s(0)
+		acc3 := simd.BroadcastFloat32s(0)
+
+		k := 0
+		for ; k < vecLimit; k += vecLen {
+			vx := simd.LoadFloat32s(x[k:])
+
+			for idx := 0; idx < vecLen; idx++ {
+				wBuf0[idx] = BFloat16ToFloat32(wRow0[k+idx])
+				wBuf1[idx] = BFloat16ToFloat32(wRow1[k+idx])
+				wBuf2[idx] = BFloat16ToFloat32(wRow2[k+idx])
+				wBuf3[idx] = BFloat16ToFloat32(wRow3[k+idx])
+			}
+
+			vw0 := simd.LoadFloat32s(wBuf0[:vecLen])
+			vw1 := simd.LoadFloat32s(wBuf1[:vecLen])
+			vw2 := simd.LoadFloat32s(wBuf2[:vecLen])
+			vw3 := simd.LoadFloat32s(wBuf3[:vecLen])
+
+			acc0 = vx.MulAdd(vw0, acc0)
+			acc1 = vx.MulAdd(vw1, acc1)
+			acc2 = vx.MulAdd(vw2, acc2)
+			acc3 = vx.MulAdd(vw3, acc3)
+		}
+
+		dot0 += reduceSumFloat32s(acc0)
+		dot1 += reduceSumFloat32s(acc1)
+		dot2 += reduceSumFloat32s(acc2)
+		dot3 += reduceSumFloat32s(acc3)
+
+		for ; k < inDim; k++ {
+			xk := x[k]
+			dot0 += xk * BFloat16ToFloat32(wRow0[k])
+			dot1 += xk * BFloat16ToFloat32(wRow1[k])
+			dot2 += xk * BFloat16ToFloat32(wRow2[k])
+			dot3 += xk * BFloat16ToFloat32(wRow3[k])
+		}
+
+		out[j] = dot0
+		out[j+1] = dot1
+		out[j+2] = dot2
+		out[j+3] = dot3
+	}
+
+	// Remaining rows
+	for ; j < outDim; j++ {
+		wRow := weight[j*inDim : (j+1)*inDim]
+		var dot float32
+		if bias != nil {
+			dot = bias[j]
+		}
+		acc0 := simd.BroadcastFloat32s(0)
+		k := 0
+		for ; k < vecLimit; k += vecLen {
+			vx := simd.LoadFloat32s(x[k:])
+			for idx := 0; idx < vecLen; idx++ {
+				wBuf0[idx] = BFloat16ToFloat32(wRow[k+idx])
+			}
+			vw := simd.LoadFloat32s(wBuf0[:vecLen])
+			acc0 = vx.MulAdd(vw, acc0)
+		}
+
+		dot += reduceSumFloat32s(acc0)
+		for ; k < inDim; k++ {
+			dot += x[k] * BFloat16ToFloat32(wRow[k])
+		}
+
+		out[j] = dot
+	}
+}
+
 // LayerNormSIMD computes LayerNorm with SIMD vectorization.
 func LayerNormSIMD(x []float32, weight, bias, out []float32, dim int, eps float32) {
 	vecLen := simd.BroadcastFloat32s(0).Len()
@@ -217,7 +410,7 @@ func GELUApproxSIMD(x, out []float32, n int) {
 		vx3 := vx2.Mul(vx)
 		// inner = sqrt(2/pi) * (x + 0.044715 * x^3)
 		inner := vSqrt2Pi.Mul(vx.MulAdd(vCoeff, vx3))
-		
+
 		// Apply tanh to inner elements
 		inner.Store(buf[:vecLen])
 		for i := 0; i < vecLen; i++ {

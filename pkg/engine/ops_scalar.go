@@ -36,6 +36,148 @@ func MatVecMulAddScalar(x []float32, weight []float32, bias []float32, out []flo
 	}
 }
 
+// MatVecMulAddINT8Scalar computes out = (x * W_int8^T) * scale + bias
+// x: [inDim], weight: [outDim, inDim] (int8 row-major), scale: [outDim], bias: [outDim], out: [outDim]
+func MatVecMulAddINT8Scalar(x []float32, weight []int8, scale []float32, bias []float32, out []float32, inDim, outDim int) {
+	j := 0
+	for ; j <= outDim-4; j += 4 {
+		wRow0 := weight[j*inDim : (j+1)*inDim]
+		wRow1 := weight[(j+1)*inDim : (j+2)*inDim]
+		wRow2 := weight[(j+2)*inDim : (j+3)*inDim]
+		wRow3 := weight[(j+3)*inDim : (j+4)*inDim]
+
+		var dot0, dot1, dot2, dot3 float32
+		k := 0
+		n8 := inDim - (inDim % 8)
+		for ; k < n8; k += 8 {
+			xk0 := x[k]
+			xk1 := x[k+1]
+			xk2 := x[k+2]
+			xk3 := x[k+3]
+			xk4 := x[k+4]
+			xk5 := x[k+5]
+			xk6 := x[k+6]
+			xk7 := x[k+7]
+
+			dot0 += xk0*float32(wRow0[k]) + xk1*float32(wRow0[k+1]) + xk2*float32(wRow0[k+2]) + xk3*float32(wRow0[k+3]) +
+				xk4*float32(wRow0[k+4]) + xk5*float32(wRow0[k+5]) + xk6*float32(wRow0[k+6]) + xk7*float32(wRow0[k+7])
+
+			dot1 += xk0*float32(wRow1[k]) + xk1*float32(wRow1[k+1]) + xk2*float32(wRow1[k+2]) + xk3*float32(wRow1[k+3]) +
+				xk4*float32(wRow1[k+4]) + xk5*float32(wRow1[k+5]) + xk6*float32(wRow1[k+6]) + xk7*float32(wRow1[k+7])
+
+			dot2 += xk0*float32(wRow2[k]) + xk1*float32(wRow2[k+1]) + xk2*float32(wRow2[k+2]) + xk3*float32(wRow2[k+3]) +
+				xk4*float32(wRow2[k+4]) + xk5*float32(wRow2[k+5]) + xk6*float32(wRow2[k+6]) + xk7*float32(wRow2[k+7])
+
+			dot3 += xk0*float32(wRow3[k]) + xk1*float32(wRow3[k+1]) + xk2*float32(wRow3[k+2]) + xk3*float32(wRow3[k+3]) +
+				xk4*float32(wRow3[k+4]) + xk5*float32(wRow3[k+5]) + xk6*float32(wRow3[k+6]) + xk7*float32(wRow3[k+7])
+		}
+		for ; k < inDim; k++ {
+			xk := x[k]
+			dot0 += xk * float32(wRow0[k])
+			dot1 += xk * float32(wRow1[k])
+			dot2 += xk * float32(wRow2[k])
+			dot3 += xk * float32(wRow3[k])
+		}
+
+		res0 := dot0 * scale[j]
+		res1 := dot1 * scale[j+1]
+		res2 := dot2 * scale[j+2]
+		res3 := dot3 * scale[j+3]
+		if bias != nil {
+			res0 += bias[j]
+			res1 += bias[j+1]
+			res2 += bias[j+2]
+			res3 += bias[j+3]
+		}
+		out[j] = res0
+		out[j+1] = res1
+		out[j+2] = res2
+		out[j+3] = res3
+	}
+
+	for ; j < outDim; j++ {
+		wRow := weight[j*inDim : (j+1)*inDim]
+		var dot float32
+		for k := 0; k < inDim; k++ {
+			dot += x[k] * float32(wRow[k])
+		}
+		res := dot * scale[j]
+		if bias != nil {
+			res += bias[j]
+		}
+		out[j] = res
+	}
+}
+
+// MatVecMulAddBF16Scalar computes out = x * W_bf16^T + bias
+// x: [inDim], weight: [outDim, inDim] (BFloat16 uint16 row-major), bias: [outDim], out: [outDim]
+func MatVecMulAddBF16Scalar(x []float32, weight []uint16, bias []float32, out []float32, inDim, outDim int) {
+	j := 0
+	for ; j <= outDim-4; j += 4 {
+		wRow0 := weight[j*inDim : (j+1)*inDim]
+		wRow1 := weight[(j+1)*inDim : (j+2)*inDim]
+		wRow2 := weight[(j+2)*inDim : (j+3)*inDim]
+		wRow3 := weight[(j+3)*inDim : (j+4)*inDim]
+
+		var dot0, dot1, dot2, dot3 float32
+		if bias != nil {
+			dot0 = bias[j]
+			dot1 = bias[j+1]
+			dot2 = bias[j+2]
+			dot3 = bias[j+3]
+		}
+
+		k := 0
+		n8 := inDim - (inDim % 8)
+		for ; k < n8; k += 8 {
+			xk0 := x[k]
+			xk1 := x[k+1]
+			xk2 := x[k+2]
+			xk3 := x[k+3]
+			xk4 := x[k+4]
+			xk5 := x[k+5]
+			xk6 := x[k+6]
+			xk7 := x[k+7]
+
+			dot0 += xk0*BFloat16ToFloat32(wRow0[k]) + xk1*BFloat16ToFloat32(wRow0[k+1]) + xk2*BFloat16ToFloat32(wRow0[k+2]) + xk3*BFloat16ToFloat32(wRow0[k+3]) +
+				xk4*BFloat16ToFloat32(wRow0[k+4]) + xk5*BFloat16ToFloat32(wRow0[k+5]) + xk6*BFloat16ToFloat32(wRow0[k+6]) + xk7*BFloat16ToFloat32(wRow0[k+7])
+
+			dot1 += xk0*BFloat16ToFloat32(wRow1[k]) + xk1*BFloat16ToFloat32(wRow1[k+1]) + xk2*BFloat16ToFloat32(wRow1[k+2]) + xk3*BFloat16ToFloat32(wRow1[k+3]) +
+				xk4*BFloat16ToFloat32(wRow1[k+4]) + xk5*BFloat16ToFloat32(wRow1[k+5]) + xk6*BFloat16ToFloat32(wRow1[k+6]) + xk7*BFloat16ToFloat32(wRow1[k+7])
+
+			dot2 += xk0*BFloat16ToFloat32(wRow2[k]) + xk1*BFloat16ToFloat32(wRow2[k+1]) + xk2*BFloat16ToFloat32(wRow2[k+2]) + xk3*BFloat16ToFloat32(wRow2[k+3]) +
+				xk4*BFloat16ToFloat32(wRow2[k+4]) + xk5*BFloat16ToFloat32(wRow2[k+5]) + xk6*BFloat16ToFloat32(wRow2[k+6]) + xk7*BFloat16ToFloat32(wRow2[k+7])
+
+			dot3 += xk0*BFloat16ToFloat32(wRow3[k]) + xk1*BFloat16ToFloat32(wRow3[k+1]) + xk2*BFloat16ToFloat32(wRow3[k+2]) + xk3*BFloat16ToFloat32(wRow3[k+3]) +
+				xk4*BFloat16ToFloat32(wRow3[k+4]) + xk5*BFloat16ToFloat32(wRow3[k+5]) + xk6*BFloat16ToFloat32(wRow3[k+6]) + xk7*BFloat16ToFloat32(wRow3[k+7])
+		}
+		for ; k < inDim; k++ {
+			xk := x[k]
+			dot0 += xk * BFloat16ToFloat32(wRow0[k])
+			dot1 += xk * BFloat16ToFloat32(wRow1[k])
+			dot2 += xk * BFloat16ToFloat32(wRow2[k])
+			dot3 += xk * BFloat16ToFloat32(wRow3[k])
+		}
+
+		out[j] = dot0
+		out[j+1] = dot1
+		out[j+2] = dot2
+		out[j+3] = dot3
+	}
+
+	for ; j < outDim; j++ {
+		wRow := weight[j*inDim : (j+1)*inDim]
+		var dot float32
+		if bias != nil {
+			dot = bias[j]
+		}
+		for k := 0; k < inDim; k++ {
+			dot += x[k] * BFloat16ToFloat32(wRow[k])
+		}
+		out[j] = dot
+	}
+}
+
 // LayerNormScalar computes out = (x - mean) / sqrt(variance + eps) * weight + bias
 func LayerNormScalar(x []float32, weight, bias, out []float32, dim int, eps float32) {
 	var sum float32

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  GO_VERSION: '1.27.0'
+
+jobs:
+  semgrep:
+    name: Semgrep Scan
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep
+    if: (github.actor != 'dependabot[bot]')
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep
+        env:
+          SEMGREP_RULES: p/default
+
+  osv-scanner:
+    name: OSV Vulnerability Scanner
+    runs-on: ubuntu-latest
+    container: ghcr.io/google/osv-scanner
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Scan the code
+        run: /osv-scanner -r . || if [ $? -eq 128 ]; then true; else exit $?; fi
+
+  lint:
+    name: Lint & Code Style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Verify Formatting (gofmt)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not formatted properly according to gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Go Vet
+        run: go vet ./...
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+        continue-on-error: true
+
+  test:
+    name: Go Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        simd: [false, true]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Run Tests (Scalar Portable Fallback)
+        if: matrix.simd == false
+        run: go test -v -race -coverprofile=coverage.out ./pkg/safetensors ./pkg/tokenizer ./pkg/spagoref ./pkg/engine
+      - name: Run Tests (Hardware SIMD Accelerated)
+        if: matrix.simd == true
+        run: GOEXPERIMENT=simd go test -v ./pkg/safetensors ./pkg/tokenizer ./pkg/spagoref ./pkg/engine
+      - name: Upload coverage reports to Codecov
+        if: matrix.simd == false
+        uses: codecov/codecov-action@v4
+        continue-on-error: true
+        with:
+          file: ./coverage.out

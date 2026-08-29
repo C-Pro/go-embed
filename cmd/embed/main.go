@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,31 +12,51 @@ import (
 )
 
 func main() {
-	modelDir := flag.String("model-dir", "models/intfloat/multilingual-e5-small", "Path to model directory containing model.safetensors and tokenizer.json")
+	modelDir := flag.String("model-dir", "", "Path to model directory containing model.safetensors and tokenizer.json")
+	modelName := flag.String("model-name", "", "Hugging Face model repository name (e.g. 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')")
 	mode := flag.String("mode", "cli", "Mode of operation: 'cli' (interactive), 'query' (single query embedding), or 'sim' (cosine similarity between two texts)")
 	text1 := flag.String("t1", "", "First text for similarity comparison or single text for query")
 	text2 := flag.String("t2", "", "Second text for similarity comparison")
 	isQuery := flag.Bool("query-prefix", true, "Automatically prepend 'query: ' if no prefix is present")
 	isPassage := flag.Bool("passage-prefix", false, "Prepend 'passage: ' prefix")
+	precFlag := flag.String("prec", "fp32", "Precision mode: 'fp32' (full precision), 'bf16' (bfloat16 2x smaller), or 'int8' (int8 3.6x smaller)")
+	quant := flag.Bool("quant", false, "Shortcut for -prec=int8")
+	bf16 := flag.Bool("bf16", false, "Shortcut for -prec=bf16")
 	flag.Parse()
 
-	safetensorsPath := filepath.Join(*modelDir, "model.safetensors")
-	tokPath := filepath.Join(*modelDir, "tokenizer.json")
-
-	if _, err := os.Stat(safetensorsPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: model weights not found at %s\n", safetensorsPath)
-		os.Exit(1)
+	prec := engine.PrecisionFP32
+	if *quant || strings.ToLower(*precFlag) == "int8" {
+		prec = engine.PrecisionINT8
+	} else if *bf16 || strings.ToLower(*precFlag) == "bf16" {
+		prec = engine.PrecisionBF16
 	}
 
-	fmt.Printf("Loading pure Go E5 engine from %s...\n", *modelDir)
+	opts := []engine.Option{engine.WithPrecision(prec)}
+	if *modelName != "" {
+		opts = append(opts, engine.WithModelName(*modelName))
+	}
+	if *modelDir != "" {
+		opts = append(opts, engine.WithDataDir(*modelDir))
+	}
+
+	targetDesc := *modelName
+	if targetDesc == "" {
+		if *modelDir != "" {
+			targetDesc = *modelDir
+		} else {
+			targetDesc = engine.DefaultModelName
+		}
+	}
+
+	fmt.Printf("Initializing pure Go embedding engine (Precision: %s, Model: %s)...\n", prec, targetDesc)
 	start := time.Now()
-	eng, err := engine.New(safetensorsPath, tokPath)
+	eng, err := engine.NewEngine(opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load model: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Model loaded in %v (SIMD Accelerated: %v, Hidden Size: %d, Layers: %d)\n\n",
-		time.Since(start), engine.HasSIMD, engine.HiddenSize, engine.NumLayers)
+	fmt.Printf("Model ready in %v (SIMD Accelerated: %v, Precision: %s, Hidden Size: %d, Layers: %d)\n\n",
+		time.Since(start), engine.HasSIMD, eng.Precision(), engine.HiddenSize, engine.NumLayers)
 
 	prepareText := func(t string) string {
 		if strings.HasPrefix(t, "query: ") || strings.HasPrefix(t, "passage: ") {
@@ -99,7 +118,7 @@ func main() {
 	case "cli":
 		fmt.Println("=== Interactive Text Embedding & Semantic Search CLI ===")
 		fmt.Println("Enter text below to generate embeddings, or type 'sim <text1> | <text2>' for cosine similarity.")
-		fmt.Println("Type 'exit' or 'quit' to quit.\n")
+		fmt.Printf("Type 'exit' or 'quit' to quit.\n\n")
 
 		scanner := bufio.NewScanner(os.Stdin)
 		for {

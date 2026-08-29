@@ -160,35 +160,56 @@ func (ctx *InferenceContext) Forward(seqLen int, out []float32) []float32 {
 	m := ctx.Model
 
 	matMul := MatVecMulAddScalar
+	matMulQ := MatVecMulAddINT8Scalar
+	matMulBF16 := MatVecMulAddBF16Scalar
 	layerNorm := LayerNormScalar
 	gelu := GELUScalar
 	l2Norm := L2NormalizeScalar
 
 	if ctx.UseSIMD && HasSIMD {
 		matMul = MatVecMulAddSIMD
+		matMulQ = MatVecMulAddINT8SIMD
+		matMulBF16 = MatVecMulAddBF16SIMD
 		layerNorm = LayerNormSIMD
 		gelu = GELUSIMD
 		l2Norm = L2NormalizeSIMD
 	}
 
 	// 1. Embeddings lookup & LayerNorm
+	vocabLimit := m.VocabSize()
 	for t := 0; t < seqLen; t++ {
 		id := ctx.InputIDs[t]
-		if id < 0 || id >= VocabSize {
+		if id < 0 || id >= vocabLimit {
 			id = tokenizer.UNK_ID
 		}
 
-		wOffset := id * HiddenSize
 		pOffset := t * HiddenSize
 		hOffset := t * HiddenSize
 
-		wEmb := m.WordEmbeddings[wOffset : wOffset+HiddenSize]
 		pEmb := m.PositionEmbeddings[pOffset : pOffset+HiddenSize]
 		tEmb := m.TokenTypeEmbeddings[:HiddenSize]
 		sumSlice := ctx.Residual[hOffset : hOffset+HiddenSize]
 
-		for d := 0; d < HiddenSize; d++ {
-			sumSlice[d] = wEmb[d] + pEmb[d] + tEmb[d]
+		switch m.Precision {
+		case PrecisionBF16:
+			wOffset := id * HiddenSize
+			wWords := m.BF16WordEmbeddings[wOffset : wOffset+HiddenSize]
+			for d := 0; d < HiddenSize; d++ {
+				sumSlice[d] = BFloat16ToFloat32(wWords[d]) + pEmb[d] + tEmb[d]
+			}
+		case PrecisionINT8:
+			wOffset := id * HiddenSize
+			qScale := m.QWordEmbeddings.Scale[id]
+			qWeights := m.QWordEmbeddings.Weight[wOffset : wOffset+HiddenSize]
+			for d := 0; d < HiddenSize; d++ {
+				sumSlice[d] = float32(qWeights[d])*qScale + pEmb[d] + tEmb[d]
+			}
+		default:
+			wOffset := id * HiddenSize
+			wEmb := m.WordEmbeddings[wOffset : wOffset+HiddenSize]
+			for d := 0; d < HiddenSize; d++ {
+				sumSlice[d] = wEmb[d] + pEmb[d] + tEmb[d]
+			}
 		}
 
 		layerNorm(
@@ -203,85 +224,252 @@ func (ctx *InferenceContext) Forward(seqLen int, out []float32) []float32 {
 
 	// 2. 12 Transformer Layers
 	for l := 0; l < NumLayers; l++ {
-		layer := &m.Layers[l]
+		switch m.Precision {
+		case PrecisionBF16:
+			layer := &m.BF16Layers[l]
 
-		// Multi-head self attention projections Q, K, V
-		for t := 0; t < seqLen; t++ {
-			tOffset := t * HiddenSize
-			xt := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
-
-			matMul(xt, layer.QueryWeight, layer.QueryBias, ctx.Q[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
-			matMul(xt, layer.KeyWeight, layer.KeyBias, ctx.K[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
-			matMul(xt, layer.ValueWeight, layer.ValueBias, ctx.V[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
-		}
-
-		// Scaled dot-product attention per head
-		for h := 0; h < NumHeads; h++ {
-			hOffset := h * HeadDim
-
+			// Multi-head self attention projections Q, K, V
 			for t := 0; t < seqLen; t++ {
-				qt := ctx.Q[t*HiddenSize+hOffset : t*HiddenSize+hOffset+HeadDim]
+				tOffset := t * HiddenSize
+				xt := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
 
-				// Compute scores against all positions s
-				for s := 0; s < seqLen; s++ {
-					ks := ctx.K[s*HiddenSize+hOffset : s*HiddenSize+hOffset+HeadDim]
-					var dot float32
-					for d := 0; d < HeadDim; d++ {
-						dot += qt[d] * ks[d]
-					}
-					ctx.Scores[s] = dot * scaleFactor
-				}
+				matMulBF16(xt, layer.Query.Weight, layer.Query.Bias, ctx.Q[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMulBF16(xt, layer.Key.Weight, layer.Key.Bias, ctx.K[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMulBF16(xt, layer.Value.Weight, layer.Value.Bias, ctx.V[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+			}
 
-				// Softmax over sequence scores
-				SoftmaxScalar(ctx.Scores[:seqLen], ctx.Scores[:seqLen], seqLen)
+			// Scaled dot-product attention per head
+			for h := 0; h < NumHeads; h++ {
+				hOffset := h * HeadDim
 
-				// Weighted sum of values
-				for d := 0; d < HeadDim; d++ {
-					var sumVal float32
+				for t := 0; t < seqLen; t++ {
+					qt := ctx.Q[t*HiddenSize+hOffset : t*HiddenSize+hOffset+HeadDim]
+
+					// Compute scores against all positions s
 					for s := 0; s < seqLen; s++ {
-						sumVal += ctx.Scores[s] * ctx.V[s*HiddenSize+hOffset+d]
+						ks := ctx.K[s*HiddenSize+hOffset : s*HiddenSize+hOffset+HeadDim]
+						var dot float32
+						for d := 0; d < HeadDim; d++ {
+							dot += qt[d] * ks[d]
+						}
+						ctx.Scores[s] = dot * scaleFactor
 					}
-					ctx.AttnContext[t*HiddenSize+hOffset+d] = sumVal
+
+					// Softmax over sequence scores
+					SoftmaxScalar(ctx.Scores[:seqLen], ctx.Scores[:seqLen], seqLen)
+
+					// Weighted sum of values
+					for d := 0; d < HeadDim; d++ {
+						var sumVal float32
+						for s := 0; s < seqLen; s++ {
+							sumVal += ctx.Scores[s] * ctx.V[s*HiddenSize+hOffset+d]
+						}
+						ctx.AttnContext[t*HiddenSize+hOffset+d] = sumVal
+					}
 				}
 			}
-		}
 
-		// Attention output projection, residual connection, and LayerNorm
-		for t := 0; t < seqLen; t++ {
-			tOffset := t * HiddenSize
-			cSlice := ctx.AttnContext[tOffset : tOffset+HiddenSize]
-			matMul(cSlice, layer.OutWeight, layer.OutBias, ctx.AttnOut[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+			// Attention output projection, residual connection, and LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffset := t * HiddenSize
+				cSlice := ctx.AttnContext[tOffset : tOffset+HiddenSize]
+				matMulBF16(cSlice, layer.Out.Weight, layer.Out.Bias, ctx.AttnOut[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
 
-			resSlice := ctx.Residual[tOffset : tOffset+HiddenSize]
-			hSlice := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
-			attnOutSlice := ctx.AttnOut[tOffset : tOffset+HiddenSize]
+				resSlice := ctx.Residual[tOffset : tOffset+HiddenSize]
+				hSlice := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
+				attnOutSlice := ctx.AttnOut[tOffset : tOffset+HiddenSize]
 
-			for d := 0; d < HiddenSize; d++ {
-				resSlice[d] = hSlice[d] + attnOutSlice[d]
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = hSlice[d] + attnOutSlice[d]
+				}
+
+				layerNorm(resSlice, layer.AttnNormW, layer.AttnNormB, hSlice, HiddenSize, LayerNormEps)
 			}
 
-			layerNorm(resSlice, layer.AttnNormW, layer.AttnNormB, hSlice, HiddenSize, LayerNormEps)
-		}
+			// Feed-Forward Network: Linear (384 -> 1536) -> GELU -> Linear (1536 -> 384) -> Residual -> LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffsetH := t * HiddenSize
+				tOffsetFFN := t * IntermediateSize
 
-		// Feed-Forward Network: Linear (384 -> 1536) -> GELU -> Linear (1536 -> 384) -> Residual -> LayerNorm
-		for t := 0; t < seqLen; t++ {
-			tOffsetH := t * HiddenSize
-			tOffsetFFN := t * IntermediateSize
+				xt := ctx.HiddenStates[tOffsetH : tOffsetH+HiddenSize]
+				ffnMid := ctx.FFNMid[tOffsetFFN : tOffsetFFN+IntermediateSize]
+				ffnOut := ctx.FFNOut[tOffsetH : tOffsetH+HiddenSize]
 
-			xt := ctx.HiddenStates[tOffsetH : tOffsetH+HiddenSize]
-			ffnMid := ctx.FFNMid[tOffsetFFN : tOffsetFFN+IntermediateSize]
-			ffnOut := ctx.FFNOut[tOffsetH : tOffsetH+HiddenSize]
+				matMulBF16(xt, layer.FFN1.Weight, layer.FFN1.Bias, ffnMid, HiddenSize, IntermediateSize)
+				gelu(ffnMid, ffnMid, IntermediateSize)
+				matMulBF16(ffnMid, layer.FFN2.Weight, layer.FFN2.Bias, ffnOut, IntermediateSize, HiddenSize)
 
-			matMul(xt, layer.FFN1Weight, layer.FFN1Bias, ffnMid, HiddenSize, IntermediateSize)
-			gelu(ffnMid, ffnMid, IntermediateSize)
-			matMul(ffnMid, layer.FFN2Weight, layer.FFN2Bias, ffnOut, IntermediateSize, HiddenSize)
+				resSlice := ctx.Residual[tOffsetH : tOffsetH+HiddenSize]
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = xt[d] + ffnOut[d]
+				}
 
-			resSlice := ctx.Residual[tOffsetH : tOffsetH+HiddenSize]
-			for d := 0; d < HiddenSize; d++ {
-				resSlice[d] = xt[d] + ffnOut[d]
+				layerNorm(resSlice, layer.FFNNormW, layer.FFNNormB, xt, HiddenSize, LayerNormEps)
 			}
 
-			layerNorm(resSlice, layer.FFNNormW, layer.FFNNormB, xt, HiddenSize, LayerNormEps)
+		case PrecisionINT8:
+			layer := &m.QLayers[l]
+
+			// Multi-head self attention projections Q, K, V
+			for t := 0; t < seqLen; t++ {
+				tOffset := t * HiddenSize
+				xt := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
+
+				matMulQ(xt, layer.Query.Weight, layer.Query.Scale, layer.Query.Bias, ctx.Q[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMulQ(xt, layer.Key.Weight, layer.Key.Scale, layer.Key.Bias, ctx.K[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMulQ(xt, layer.Value.Weight, layer.Value.Scale, layer.Value.Bias, ctx.V[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+			}
+
+			// Scaled dot-product attention per head
+			for h := 0; h < NumHeads; h++ {
+				hOffset := h * HeadDim
+
+				for t := 0; t < seqLen; t++ {
+					qt := ctx.Q[t*HiddenSize+hOffset : t*HiddenSize+hOffset+HeadDim]
+
+					// Compute scores against all positions s
+					for s := 0; s < seqLen; s++ {
+						ks := ctx.K[s*HiddenSize+hOffset : s*HiddenSize+hOffset+HeadDim]
+						var dot float32
+						for d := 0; d < HeadDim; d++ {
+							dot += qt[d] * ks[d]
+						}
+						ctx.Scores[s] = dot * scaleFactor
+					}
+
+					// Softmax over sequence scores
+					SoftmaxScalar(ctx.Scores[:seqLen], ctx.Scores[:seqLen], seqLen)
+
+					// Weighted sum of values
+					for d := 0; d < HeadDim; d++ {
+						var sumVal float32
+						for s := 0; s < seqLen; s++ {
+							sumVal += ctx.Scores[s] * ctx.V[s*HiddenSize+hOffset+d]
+						}
+						ctx.AttnContext[t*HiddenSize+hOffset+d] = sumVal
+					}
+				}
+			}
+
+			// Attention output projection, residual connection, and LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffset := t * HiddenSize
+				cSlice := ctx.AttnContext[tOffset : tOffset+HiddenSize]
+				matMulQ(cSlice, layer.Out.Weight, layer.Out.Scale, layer.Out.Bias, ctx.AttnOut[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+
+				resSlice := ctx.Residual[tOffset : tOffset+HiddenSize]
+				hSlice := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
+				attnOutSlice := ctx.AttnOut[tOffset : tOffset+HiddenSize]
+
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = hSlice[d] + attnOutSlice[d]
+				}
+
+				layerNorm(resSlice, layer.AttnNormW, layer.AttnNormB, hSlice, HiddenSize, LayerNormEps)
+			}
+
+			// Feed-Forward Network: Linear (384 -> 1536) -> GELU -> Linear (1536 -> 384) -> Residual -> LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffsetH := t * HiddenSize
+				tOffsetFFN := t * IntermediateSize
+
+				xt := ctx.HiddenStates[tOffsetH : tOffsetH+HiddenSize]
+				ffnMid := ctx.FFNMid[tOffsetFFN : tOffsetFFN+IntermediateSize]
+				ffnOut := ctx.FFNOut[tOffsetH : tOffsetH+HiddenSize]
+
+				matMulQ(xt, layer.FFN1.Weight, layer.FFN1.Scale, layer.FFN1.Bias, ffnMid, HiddenSize, IntermediateSize)
+				gelu(ffnMid, ffnMid, IntermediateSize)
+				matMulQ(ffnMid, layer.FFN2.Weight, layer.FFN2.Scale, layer.FFN2.Bias, ffnOut, IntermediateSize, HiddenSize)
+
+				resSlice := ctx.Residual[tOffsetH : tOffsetH+HiddenSize]
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = xt[d] + ffnOut[d]
+				}
+
+				layerNorm(resSlice, layer.FFNNormW, layer.FFNNormB, xt, HiddenSize, LayerNormEps)
+			}
+
+		default:
+			layer := &m.Layers[l]
+
+			// Multi-head self attention projections Q, K, V
+			for t := 0; t < seqLen; t++ {
+				tOffset := t * HiddenSize
+				xt := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
+
+				matMul(xt, layer.QueryWeight, layer.QueryBias, ctx.Q[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMul(xt, layer.KeyWeight, layer.KeyBias, ctx.K[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+				matMul(xt, layer.ValueWeight, layer.ValueBias, ctx.V[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+			}
+
+			// Scaled dot-product attention per head
+			for h := 0; h < NumHeads; h++ {
+				hOffset := h * HeadDim
+
+				for t := 0; t < seqLen; t++ {
+					qt := ctx.Q[t*HiddenSize+hOffset : t*HiddenSize+hOffset+HeadDim]
+
+					// Compute scores against all positions s
+					for s := 0; s < seqLen; s++ {
+						ks := ctx.K[s*HiddenSize+hOffset : s*HiddenSize+hOffset+HeadDim]
+						var dot float32
+						for d := 0; d < HeadDim; d++ {
+							dot += qt[d] * ks[d]
+						}
+						ctx.Scores[s] = dot * scaleFactor
+					}
+
+					// Softmax over sequence scores
+					SoftmaxScalar(ctx.Scores[:seqLen], ctx.Scores[:seqLen], seqLen)
+
+					// Weighted sum of values
+					for d := 0; d < HeadDim; d++ {
+						var sumVal float32
+						for s := 0; s < seqLen; s++ {
+							sumVal += ctx.Scores[s] * ctx.V[s*HiddenSize+hOffset+d]
+						}
+						ctx.AttnContext[t*HiddenSize+hOffset+d] = sumVal
+					}
+				}
+			}
+
+			// Attention output projection, residual connection, and LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffset := t * HiddenSize
+				cSlice := ctx.AttnContext[tOffset : tOffset+HiddenSize]
+				matMul(cSlice, layer.OutWeight, layer.OutBias, ctx.AttnOut[tOffset:tOffset+HiddenSize], HiddenSize, HiddenSize)
+
+				resSlice := ctx.Residual[tOffset : tOffset+HiddenSize]
+				hSlice := ctx.HiddenStates[tOffset : tOffset+HiddenSize]
+				attnOutSlice := ctx.AttnOut[tOffset : tOffset+HiddenSize]
+
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = hSlice[d] + attnOutSlice[d]
+				}
+
+				layerNorm(resSlice, layer.AttnNormW, layer.AttnNormB, hSlice, HiddenSize, LayerNormEps)
+			}
+
+			// Feed-Forward Network: Linear (384 -> 1536) -> GELU -> Linear (1536 -> 384) -> Residual -> LayerNorm
+			for t := 0; t < seqLen; t++ {
+				tOffsetH := t * HiddenSize
+				tOffsetFFN := t * IntermediateSize
+
+				xt := ctx.HiddenStates[tOffsetH : tOffsetH+HiddenSize]
+				ffnMid := ctx.FFNMid[tOffsetFFN : tOffsetFFN+IntermediateSize]
+				ffnOut := ctx.FFNOut[tOffsetH : tOffsetH+HiddenSize]
+
+				matMul(xt, layer.FFN1Weight, layer.FFN1Bias, ffnMid, HiddenSize, IntermediateSize)
+				gelu(ffnMid, ffnMid, IntermediateSize)
+				matMul(ffnMid, layer.FFN2Weight, layer.FFN2Bias, ffnOut, IntermediateSize, HiddenSize)
+
+				resSlice := ctx.Residual[tOffsetH : tOffsetH+HiddenSize]
+				for d := 0; d < HiddenSize; d++ {
+					resSlice[d] = xt[d] + ffnOut[d]
+				}
+
+				layerNorm(resSlice, layer.FFNNormW, layer.FFNNormB, xt, HiddenSize, LayerNormEps)
+			}
 		}
 	}
 

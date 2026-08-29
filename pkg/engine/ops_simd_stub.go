@@ -9,6 +9,14 @@ func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float
 	MatVecMulAddScalar(x, weight, bias, out, inDim, outDim)
 }
 
+func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []float32, out []float32, inDim, outDim int) {
+	MatVecMulAddINT8Scalar(x, weight, scale, bias, out, inDim, outDim)
+}
+
+func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []float32, inDim, outDim int) {
+	MatVecMulAddBF16Scalar(x, weight, bias, out, inDim, outDim)
+}
+
 func LayerNormSIMD(x []float32, weight, bias, out []float32, dim int, eps float32) {
 	LayerNormScalar(x, weight, bias, out, dim, eps)
 }

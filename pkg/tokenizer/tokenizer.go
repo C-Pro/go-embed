@@ -29,17 +29,17 @@ type TrieNode struct {
 
 // Tokenizer implements a pure-Go SentencePiece / Unigram tokenizer for XLM-RoBERTa.
 type Tokenizer struct {
-	root     *TrieNode
-	vocab    []string
-	scores   []float32
-	pieceToID map[string]int
+	root         *TrieNode
+	vocab        []string
+	scores       []float32
+	pieceToID    map[string]int
 	multiSpaceRe *regexp.Regexp
 }
 
 type tokenizerJSON struct {
 	Model struct {
-		Type  string            `json:"type"`
-		Vocab [][]interface{}   `json:"vocab"`
+		Type  string          `json:"type"`
+		Vocab [][]interface{} `json:"vocab"`
 	} `json:"model"`
 	AddedTokens []struct {
 		ID      int    `json:"id"`
