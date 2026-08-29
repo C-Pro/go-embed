@@ -193,10 +193,11 @@ import (
 )
 
 func main() {
-	eng, _ := engine.New(
-		"models/intfloat/multilingual-e5-small/model.safetensors",
-		"models/intfloat/multilingual-e5-small/tokenizer.json",
-	)
+	// Initialize engine with default options (auto-downloads if missing)
+	eng, err := engine.NewEngine()
+	if err != nil {
+		panic(err)
+	}
 
 	// ContextPool manages reusable memory scratchpads for goroutines
 	pool := engine.NewContextPool(eng.Model())
@@ -295,15 +296,20 @@ GOEXPERIMENT=simd go test -run=^$ -bench=. -benchmem ./pkg/engine
 
 ```
 .
+├── .github/
+│   └── workflows/ci.yml    # GitHub Actions CI (Semgrep, OSV scanner, lint, tests)
 ├── cmd/
 │   └── embed/              # Interactive CLI application
 ├── pkg/
-│   ├── engine/             # Core inference engine, Post-LN transformer layers & scratchpad pool
+│   ├── engine/             # Core inference engine, transformer layers & scratchpad pool
+│   │   ├── downloader.go   # Automatic Hugging Face model downloader and caching
 │   │   ├── ops_simd.go     # Go 1.27 hardware SIMD vector kernels (FMA, LayerNorm, GELU)
 │   │   ├── ops_scalar.go   # Unrolled portable scalar math kernels
+│   │   ├── quant.go        # INT8 dynamic quantization structures and kernels
+│   │   ├── quant_bf16.go   # BFloat16 16-bit float packaging and math
 │   │   ├── context.go      # Pre-allocated zero-allocation scratchpad and sync.Pool
-│   │   ├── model.go        # Contiguous model parameter layouts
-│   │   └── engine.go       # High-level thread-safe embedding API
+│   │   ├── model.go        # Contiguous model parameter layouts & safetensors loader
+│   │   └── engine.go       # High-level ergonomic API (NewEngine with functional options)
 │   ├── safetensors/        # Pure Go .safetensors binary reader and parser
 │   ├── tokenizer/          # Pure Go SentencePiece/Unigram tokenizer & Viterbi search
 │   └── spagoref/           # Spago reference baseline harness for parity testing
@@ -317,7 +323,9 @@ GOEXPERIMENT=simd go test -run=^$ -bench=. -benchmem ./pkg/engine
 
 - [`github.com/nlpodyssey/spago`](https://github.com/nlpodyssey/spago) for the original pure-Go machine learning framework and foundation.
 - [`intfloat/multilingual-e5-small`](https://huggingface.co/intfloat/multilingual-e5-small) for the multilingual embedding model weights.
+- [`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2) for the paraphrase embedding model weights.
 
 ## License
 
 MIT License.
+
