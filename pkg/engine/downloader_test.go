@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed/pkg/engine"
 )
 
 func TestNewEngineFunctionalOptions(t *testing.T) {

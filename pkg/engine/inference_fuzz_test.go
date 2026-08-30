@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed/pkg/engine"
 )
 
 func skipFuzzInCI(f *testing.F) {

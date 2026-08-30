@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed"
 )
 
 func main() {
@@ -24,19 +24,19 @@ func main() {
 	bf16 := flag.Bool("bf16", false, "Shortcut for -prec=bf16")
 	flag.Parse()
 
-	prec := engine.PrecisionFP32
+	prec := embed.PrecisionFP32
 	if *quant || strings.ToLower(*precFlag) == "int8" {
-		prec = engine.PrecisionINT8
+		prec = embed.PrecisionINT8
 	} else if *bf16 || strings.ToLower(*precFlag) == "bf16" {
-		prec = engine.PrecisionBF16
+		prec = embed.PrecisionBF16
 	}
 
-	opts := []engine.Option{engine.WithPrecision(prec)}
+	opts := []embed.Option{embed.WithPrecision(prec)}
 	if *modelName != "" {
-		opts = append(opts, engine.WithModelName(*modelName))
+		opts = append(opts, embed.WithModelName(*modelName))
 	}
 	if *modelDir != "" {
-		opts = append(opts, engine.WithDataDir(*modelDir))
+		opts = append(opts, embed.WithDataDir(*modelDir))
 	}
 
 	targetDesc := *modelName
@@ -44,19 +44,19 @@ func main() {
 		if *modelDir != "" {
 			targetDesc = *modelDir
 		} else {
-			targetDesc = engine.DefaultModelName
+			targetDesc = embed.DefaultModelName
 		}
 	}
 
 	fmt.Printf("Initializing pure Go embedding engine (Precision: %s, Model: %s)...\n", prec, targetDesc)
 	start := time.Now()
-	eng, err := engine.NewEngine(opts...)
+	eng, err := embed.NewEngine(opts...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load model: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Model ready in %v (SIMD Accelerated: %v, Precision: %s, Hidden Size: %d, Layers: %d)\n\n",
-		time.Since(start), engine.HasSIMD, eng.Precision(), engine.HiddenSize, engine.NumLayers)
+		time.Since(start), embed.HasSIMD, eng.Precision(), embed.HiddenSize, embed.NumLayers)
 
 	prepareText := func(t string) string {
 		if strings.HasPrefix(t, "query: ") || strings.HasPrefix(t, "passage: ") {

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go-embed/pkg/safetensors"
+	"github.com/C-Pro/go-embed/pkg/safetensors"
 )
 
 func TestSafetensorsOpenAndRead(t *testing.T) {

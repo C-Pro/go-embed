@@ -51,7 +51,7 @@ A high-performance, pure Go (CGO-free), CPU-only inference library for tokenizat
 To install the module:
 
 ```bash
-go get go-embed
+go get github.com/C-Pro/go-embed
 ```
 
 ---
@@ -69,12 +69,12 @@ import (
 	"fmt"
 	"log"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed"
 )
 
 func main() {
 	// Initialize engine: automatically downloads model if missing, uses FP32 by default
-	eng, err := engine.NewEngine()
+	eng, err := embed.NewEngine()
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
@@ -91,8 +91,8 @@ func main() {
 	pIrrelEmbs, _ := eng.EmbedPassage(irrelPassage)
 
 	// Compute Cosine Similarity
-	simRel := engine.CosineSimilarity(qEmbs[0], pRelEmbs[0])
-	simIrrel := engine.CosineSimilarity(qEmbs[0], pIrrelEmbs[0])
+	simRel := embed.CosineSimilarity(qEmbs[0], pRelEmbs[0])
+	simIrrel := embed.CosineSimilarity(qEmbs[0], pIrrelEmbs[0])
 
 	fmt.Printf("Query: %s\n", query)
 	fmt.Printf("Similarity to relevant passage:   %.4f\n", simRel)   // ~0.87
@@ -111,35 +111,35 @@ func main() {
 
 ```go
 // Custom task prefixes overriding auto-detection
-eng, err := engine.NewEngine(
-    engine.WithPrefixes("search_query: ", "search_document: "),
+eng, err := embed.NewEngine(
+    embed.WithPrefixes("search_query: ", "search_document: "),
 )
 
 // Disable automatic prefixes completely (treat as symmetric model)
-eng, err := engine.NewEngine(
-    engine.WithNoPrefixes(),
+eng, err := embed.NewEngine(
+    embed.WithNoPrefixes(),
 )
 
 // Configure sliding window size and overlap for documents with >512 tokens
-eng, err := engine.NewEngine(
-    engine.WithChunking(512, 256), // Window 512, Overlap 256
+eng, err := embed.NewEngine(
+    embed.WithChunking(512, 256), // Window 512, Overlap 256
 )
 
 // BFloat16 mode (cuts RAM in half to 225 MB; trades off slight compute speed for memory)
-eng, err := engine.NewEngine(
-    engine.WithDataDir("./my_models"),
-    engine.WithBF16(),
+eng, err := embed.NewEngine(
+    embed.WithDataDir("./my_models"),
+    embed.WithBF16(),
 )
 
 // INT8 dynamic quantization mode (125 MB RAM for edge/memory-constrained environments)
-eng, err := engine.NewEngine(
-    engine.WithDataDir("./my_models"),
-    engine.WithINT8(),
+eng, err := embed.NewEngine(
+    embed.WithDataDir("./my_models"),
+    embed.WithINT8(),
 )
 
 // Override Hugging Face repository name
-eng, err := engine.NewEngine(
-    engine.WithModelName("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
+eng, err := embed.NewEngine(
+    embed.WithModelName("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
 )
 ```
 
@@ -175,8 +175,8 @@ The following models are verified and automatically downloaded from Hugging Face
 - **Prefix convention:** Requires `query: ` and `passage: ` prefixes for asymmetric retrieval.
 - **Example:**
   ```go
-  eng, err := engine.NewEngine(
-      engine.WithModelName("intfloat/multilingual-e5-small"),
+  eng, err := embed.NewEngine(
+      embed.WithModelName("intfloat/multilingual-e5-small"),
   )
   qEmbs, _ := eng.EmbedQuery("how to implement consensus in distributed systems?")
   pEmbs, _ := eng.EmbedPassage("Consensus algorithms like Raft and Paxos ensure consistency.")
@@ -187,9 +187,9 @@ The following models are verified and automatically downloaded from Hugging Face
 - **Prefix convention:** Direct text input (no prefix required).
 - **Example:**
   ```go
-  eng, err := engine.NewEngine(
-      engine.WithModelName("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
-      engine.WithBF16(), // Cuts RAM in half (225 MB)
+  eng, err := embed.NewEngine(
+      embed.WithModelName("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
+      embed.WithBF16(), // Cuts RAM in half (225 MB)
   )
   embs1, _ := eng.Embed("The cat is sleeping peacefully on the sofa.")
   embs2, _ := eng.Embed("Die Katze schläft friedlich auf dem Sofa.")
@@ -207,19 +207,19 @@ package main
 
 import (
 	"fmt"
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed"
 )
 
 func main() {
 	// Initialize engine with default options (auto-downloads if missing)
-	eng, err := engine.NewEngine()
+	eng, err := embed.NewEngine()
 	if err != nil {
 		panic(err)
 	}
 	defer eng.Close()
 
 	// ContextPool manages reusable memory scratchpads for goroutines
-	pool := engine.NewContextPool(eng.Model(), engine.DefaultWindowSize, engine.DefaultOverlap)
+	pool := embed.NewContextPool(eng.Model(), embed.DefaultWindowSize, embed.DefaultOverlap, "", "")
 	ctx := pool.Get()
 	defer pool.Put(ctx)
 
@@ -266,10 +266,10 @@ fmt.Printf("Computed %d embeddings\n", len(embeddings))
 
 ```go
 // BFloat16 mode (2x smaller RAM, >99.999% fidelity)
-bf16Eng, err := engine.NewEngine(engine.WithBF16())
+bf16Eng, err := embed.NewEngine(embed.WithBF16())
 
 // INT8 mode (3.6x smaller RAM)
-int8Eng, err := engine.NewEngine(engine.WithINT8())
+int8Eng, err := embed.NewEngine(embed.WithINT8())
 ```
 
 ---

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed/pkg/engine"
 )
 
 func makeDummyText(targetLen int) string {

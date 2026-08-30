@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed/pkg/engine"
 )
 
 type GoldenEntry struct {

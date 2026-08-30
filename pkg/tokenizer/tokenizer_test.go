@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"go-embed/pkg/tokenizer"
+	"github.com/C-Pro/go-embed/pkg/tokenizer"
 )
 
 type GoldenEntry struct {

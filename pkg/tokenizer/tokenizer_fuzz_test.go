@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"go-embed/pkg/tokenizer"
+	"github.com/C-Pro/go-embed/pkg/tokenizer"
 )
 
 func skipFuzzInCI(f *testing.F) {

@@ -3,7 +3,7 @@ package engine_test
 import (
 	"testing"
 
-	"go-embed/pkg/engine"
+	"github.com/C-Pro/go-embed/pkg/engine"
 )
 
 // CalibratedCosineSim computes calibrated similarity adjusting for E5 isotropic bias (~0.70).

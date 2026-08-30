@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go-embed/pkg/safetensors"
+	"github.com/C-Pro/go-embed/pkg/safetensors"
 )
 
 func skipFuzzInCI(f *testing.F) {
