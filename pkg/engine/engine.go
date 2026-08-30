@@ -250,7 +250,7 @@ func (e *Engine) PassagePrefix() string {
 
 // Close releases any memory-mapped file resources held by the engine's model.
 func (e *Engine) Close() error {
-	if e.model != nil {
+	if e != nil && e.model != nil {
 		return e.model.Close()
 	}
 	return nil
@@ -259,6 +259,9 @@ func (e *Engine) Close() error {
 // Embed generates L2-normalized 384-dimensional embeddings for the input text across sliding windows.
 // If the input text exceeds max tokens, it returns a slice of vectors, one for each window chunk.
 func (e *Engine) Embed(text string) ([][]float32, error) {
+	if e == nil || e.pool == nil {
+		return nil, fmt.Errorf("engine is not initialized")
+	}
 	ctx := e.pool.Get()
 	defer e.pool.Put(ctx)
 
@@ -267,6 +270,9 @@ func (e *Engine) Embed(text string) ([][]float32, error) {
 
 // EmbedQuery generates embeddings for a query with standard 'query: ' prefix.
 func (e *Engine) EmbedQuery(text string) ([][]float32, error) {
+	if e == nil || e.pool == nil {
+		return nil, fmt.Errorf("engine is not initialized")
+	}
 	ctx := e.pool.Get()
 	defer e.pool.Put(ctx)
 
@@ -275,6 +281,9 @@ func (e *Engine) EmbedQuery(text string) ([][]float32, error) {
 
 // EmbedPassage generates embeddings for a passage with standard 'passage: ' prefix.
 func (e *Engine) EmbedPassage(text string) ([][]float32, error) {
+	if e == nil || e.pool == nil {
+		return nil, fmt.Errorf("engine is not initialized")
+	}
 	ctx := e.pool.Get()
 	defer e.pool.Put(ctx)
 
@@ -283,6 +292,13 @@ func (e *Engine) EmbedPassage(text string) ([][]float32, error) {
 
 // EmbedBatch generates embeddings concurrently across multiple texts.
 func (e *Engine) EmbedBatch(texts []string) ([][][]float32, error) {
+	if e == nil || e.pool == nil {
+		return nil, fmt.Errorf("engine is not initialized")
+	}
+	if len(texts) == 0 {
+		return [][][]float32{}, nil
+	}
+
 	results := make([][][]float32, len(texts))
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(texts))
@@ -314,6 +330,9 @@ func (e *Engine) EmbedBatch(texts []string) ([][][]float32, error) {
 
 // Similarity calculates the maximum cosine similarity across all chunk pairs between two text strings.
 func (e *Engine) Similarity(textA, textB string) (float32, error) {
+	if e == nil || e.pool == nil {
+		return 0, fmt.Errorf("engine is not initialized")
+	}
 	embA, err := e.Embed(textA)
 	if err != nil {
 		return 0, err

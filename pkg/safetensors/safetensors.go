@@ -44,9 +44,9 @@ func Open(path string) (*Safetensors, error) {
 	}
 
 	headerLen := binary.LittleEndian.Uint64(allBytes[0:8])
-	if int64(8+headerLen) > int64(len(allBytes)) {
+	if headerLen == 0 || headerLen > uint64(len(allBytes)-8) || headerLen > 100*1024*1024 {
 		mmapFile.Close()
-		return nil, fmt.Errorf("header length %d exceeds file size %d", headerLen, len(allBytes))
+		return nil, fmt.Errorf("invalid header length %d (file size %d)", headerLen, len(allBytes))
 	}
 
 	headerBytes := allBytes[8 : 8+headerLen]
@@ -81,7 +81,7 @@ func Open(path string) (*Safetensors, error) {
 
 // Close unmaps memory and closes the underlying file descriptor.
 func (s *Safetensors) Close() error {
-	if s.mmap != nil {
+	if s != nil && s.mmap != nil {
 		err := s.mmap.Close()
 		s.mmap = nil
 		return err
@@ -89,20 +89,44 @@ func (s *Safetensors) Close() error {
 	return nil
 }
 
-// TensorF32View returns a float32 slice backed directly by mmap memory if 4-byte aligned,
-// or a newly copied slice if unaligned.
-func (s *Safetensors) TensorF32View(name string) ([]float32, error) {
+func validateTensorView(s *Safetensors, name string, expectedDTypes []string, bytesPerElement int) (int, []byte, error) {
+	if s == nil || s.mmap == nil {
+		return 0, nil, fmt.Errorf("safetensors file is nil or closed")
+	}
 	info, ok := s.Tensors[name]
 	if !ok {
-		return nil, fmt.Errorf("tensor %q not found in safetensors", name)
+		return 0, nil, fmt.Errorf("tensor %q not found in safetensors", name)
 	}
-	if info.DType != "F32" {
-		return nil, fmt.Errorf("tensor %q has dtype %s, expected F32", name, info.DType)
+	matchedDType := false
+	for _, dt := range expectedDTypes {
+		if info.DType == dt {
+			matchedDType = true
+			break
+		}
+	}
+	if !matchedDType {
+		return 0, nil, fmt.Errorf("tensor %q has dtype %s, expected one of %v", name, info.DType, expectedDTypes)
 	}
 
+	if len(info.Shape) == 0 {
+		return 0, nil, fmt.Errorf("tensor %q has empty shape", name)
+	}
 	numElements := 1
 	for _, dim := range info.Shape {
+		if dim < 0 {
+			return 0, nil, fmt.Errorf("tensor %q has negative dimension %d", name, dim)
+		}
+		if dim > 0 && numElements > math.MaxInt/dim {
+			return 0, nil, fmt.Errorf("tensor %q shape causes integer overflow", name)
+		}
 		numElements *= dim
+	}
+
+	if info.DataOffsets[0] < 0 || info.DataOffsets[1] < 0 || info.DataOffsets[0] > info.DataOffsets[1] {
+		return 0, nil, fmt.Errorf("tensor %q has invalid offsets [%d, %d]", name, info.DataOffsets[0], info.DataOffsets[1])
+	}
+	if info.DataOffsets[1] > math.MaxInt64-s.dataOffset {
+		return 0, nil, fmt.Errorf("tensor %q offsets overflow", name)
 	}
 
 	start := s.dataOffset + info.DataOffsets[0]
@@ -110,12 +134,27 @@ func (s *Safetensors) TensorF32View(name string) ([]float32, error) {
 	allBytes := s.mmap.Bytes()
 
 	if start < 0 || end > int64(len(allBytes)) || start > end {
-		return nil, fmt.Errorf("tensor %q offsets [%d, %d] out of bounds (file size %d)", name, start, end, len(allBytes))
+		return 0, nil, fmt.Errorf("tensor %q offsets [%d, %d] out of bounds (file size %d)", name, start, end, len(allBytes))
+	}
+
+	expectedBytes := int64(numElements) * int64(bytesPerElement)
+	if end-start != expectedBytes {
+		return 0, nil, fmt.Errorf("tensor %q byte length %d != expected %d", name, end-start, expectedBytes)
 	}
 
 	raw := allBytes[start:end]
-	if len(raw) != numElements*4 {
-		return nil, fmt.Errorf("tensor %q byte length %d != expected %d", name, len(raw), numElements*4)
+	return numElements, raw, nil
+}
+
+// TensorF32View returns a float32 slice backed directly by mmap memory if 4-byte aligned,
+// or a newly copied slice if unaligned.
+func (s *Safetensors) TensorF32View(name string) ([]float32, error) {
+	numElements, raw, err := validateTensorView(s, name, []string{"F32"}, 4)
+	if err != nil {
+		return nil, err
+	}
+	if numElements == 0 {
+		return []float32{}, nil
 	}
 
 	if uintptr(unsafe.Pointer(&raw[0]))%4 == 0 {
@@ -134,30 +173,12 @@ func (s *Safetensors) TensorF32View(name string) ([]float32, error) {
 // TensorBF16View returns a uint16 BFloat16 slice backed directly by mmap memory if 2-byte aligned,
 // or a newly copied slice if unaligned.
 func (s *Safetensors) TensorBF16View(name string) ([]uint16, error) {
-	info, ok := s.Tensors[name]
-	if !ok {
-		return nil, fmt.Errorf("tensor %q not found in safetensors", name)
+	numElements, raw, err := validateTensorView(s, name, []string{"BF16"}, 2)
+	if err != nil {
+		return nil, err
 	}
-	if info.DType != "BF16" {
-		return nil, fmt.Errorf("tensor %q has dtype %s, expected BF16", name, info.DType)
-	}
-
-	numElements := 1
-	for _, dim := range info.Shape {
-		numElements *= dim
-	}
-
-	start := s.dataOffset + info.DataOffsets[0]
-	end := s.dataOffset + info.DataOffsets[1]
-	allBytes := s.mmap.Bytes()
-
-	if start < 0 || end > int64(len(allBytes)) || start > end {
-		return nil, fmt.Errorf("tensor %q offsets [%d, %d] out of bounds (file size %d)", name, start, end, len(allBytes))
-	}
-
-	raw := allBytes[start:end]
-	if len(raw) != numElements*2 {
-		return nil, fmt.Errorf("tensor %q byte length %d != expected %d", name, len(raw), numElements*2)
+	if numElements == 0 {
+		return []uint16{}, nil
 	}
 
 	if uintptr(unsafe.Pointer(&raw[0]))%2 == 0 {
@@ -173,30 +194,12 @@ func (s *Safetensors) TensorBF16View(name string) ([]uint16, error) {
 
 // TensorI8View returns an int8 slice backed directly by mmap memory.
 func (s *Safetensors) TensorI8View(name string) ([]int8, error) {
-	info, ok := s.Tensors[name]
-	if !ok {
-		return nil, fmt.Errorf("tensor %q not found in safetensors", name)
+	numElements, raw, err := validateTensorView(s, name, []string{"I8", "INT8"}, 1)
+	if err != nil {
+		return nil, err
 	}
-	if info.DType != "I8" && info.DType != "INT8" {
-		return nil, fmt.Errorf("tensor %q has dtype %s, expected I8", name, info.DType)
-	}
-
-	numElements := 1
-	for _, dim := range info.Shape {
-		numElements *= dim
-	}
-
-	start := s.dataOffset + info.DataOffsets[0]
-	end := s.dataOffset + info.DataOffsets[1]
-	allBytes := s.mmap.Bytes()
-
-	if start < 0 || end > int64(len(allBytes)) || start > end {
-		return nil, fmt.Errorf("tensor %q offsets [%d, %d] out of bounds (file size %d)", name, start, end, len(allBytes))
-	}
-
-	raw := allBytes[start:end]
-	if len(raw) != numElements {
-		return nil, fmt.Errorf("tensor %q byte length %d != expected %d", name, len(raw), numElements)
+	if numElements == 0 {
+		return []int8{}, nil
 	}
 
 	return unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), numElements), nil

@@ -117,6 +117,9 @@ func (cp *ContextPool) Put(ctx *InferenceContext) {
 // Embed generates L2-normalized 384-dimensional embeddings for raw text across sliding windows.
 // It returns a slice of vectors, with one vector for each window.
 func (ctx *InferenceContext) Embed(text string) ([][]float32, error) {
+	if ctx == nil || ctx.Model == nil || ctx.Model.Tok == nil {
+		return nil, fmt.Errorf("inference context or model is not initialized")
+	}
 	ctx.RuneBuf, ctx.AllTokens = ctx.Model.Tok.EncodeRawIntoZeroAlloc(
 		text,
 		ctx.RuneBuf,
@@ -129,6 +132,9 @@ func (ctx *InferenceContext) Embed(text string) ([][]float32, error) {
 
 // EmbedQuery embeds text with the configured query prefix.
 func (ctx *InferenceContext) EmbedQuery(text string) ([][]float32, error) {
+	if ctx == nil || ctx.Model == nil {
+		return nil, fmt.Errorf("inference context or model is not initialized")
+	}
 	if ctx.QueryPrefix != "" && !strings.HasPrefix(text, ctx.QueryPrefix) {
 		text = ctx.QueryPrefix + text
 	}
@@ -137,6 +143,9 @@ func (ctx *InferenceContext) EmbedQuery(text string) ([][]float32, error) {
 
 // EmbedPassage embeds text with the configured passage prefix.
 func (ctx *InferenceContext) EmbedPassage(text string) ([][]float32, error) {
+	if ctx == nil || ctx.Model == nil {
+		return nil, fmt.Errorf("inference context or model is not initialized")
+	}
 	if ctx.PassagePrefix != "" && !strings.HasPrefix(text, ctx.PassagePrefix) {
 		text = ctx.PassagePrefix + text
 	}
@@ -145,6 +154,9 @@ func (ctx *InferenceContext) EmbedPassage(text string) ([][]float32, error) {
 
 // EmbedTokens generates embeddings for a slice of content token IDs using sliding window chunking with overlap.
 func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
+	if ctx == nil || ctx.Model == nil {
+		return nil
+	}
 	windowSize := ctx.WindowSize
 	if windowSize <= 0 || windowSize > MaxSeqLen {
 		windowSize = MaxSeqLen
@@ -156,13 +168,18 @@ func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
 
 	if len(tokens) <= maxContent {
 		seqLen := len(tokens) + 2
+		if seqLen > MaxSeqLen {
+			seqLen = MaxSeqLen
+		}
 		if cap(ctx.InputIDs) < seqLen {
 			ctx.InputIDs = make([]int, seqLen)
 		} else {
 			ctx.InputIDs = ctx.InputIDs[:seqLen]
 		}
 		ctx.InputIDs[0] = tokenizer.BOS_ID
-		copy(ctx.InputIDs[1:seqLen-1], tokens)
+		if seqLen > 2 {
+			copy(ctx.InputIDs[1:seqLen-1], tokens[:seqLen-2])
+		}
 		ctx.InputIDs[seqLen-1] = tokenizer.EOS_ID
 
 		if cap(ctx.AttentionMask) < seqLen {
@@ -203,6 +220,9 @@ func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
 		}
 		chunk := tokens[start:end]
 		seqLen := len(chunk) + 2
+		if seqLen > MaxSeqLen {
+			seqLen = MaxSeqLen
+		}
 
 		if cap(ctx.InputIDs) < seqLen {
 			ctx.InputIDs = make([]int, seqLen)
@@ -210,7 +230,9 @@ func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
 			ctx.InputIDs = ctx.InputIDs[:seqLen]
 		}
 		ctx.InputIDs[0] = tokenizer.BOS_ID
-		copy(ctx.InputIDs[1:seqLen-1], chunk)
+		if seqLen > 2 {
+			copy(ctx.InputIDs[1:seqLen-1], chunk[:seqLen-2])
+		}
 		ctx.InputIDs[seqLen-1] = tokenizer.EOS_ID
 
 		if cap(ctx.AttentionMask) < seqLen {
@@ -238,17 +260,20 @@ func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
 // If len(inputIDs) <= MaxSeqLen, it executes directly as a single window.
 // If len(inputIDs) > MaxSeqLen, it windows across the content tokens.
 func (ctx *InferenceContext) EmbedTokenIDs(inputIDs []int, attnMask []int8) ([][]float32, error) {
+	if ctx == nil || ctx.Model == nil {
+		return nil, fmt.Errorf("inference context or model is not initialized")
+	}
 	if len(inputIDs) == 0 {
 		return nil, fmt.Errorf("empty inputIDs")
 	}
 	if len(inputIDs) <= MaxSeqLen {
 		seqLen := len(inputIDs)
 		ctx.InputIDs = append(ctx.InputIDs[:0], inputIDs...)
-		if attnMask != nil {
-			ctx.AttentionMask = append(ctx.AttentionMask[:0], attnMask[:seqLen]...)
-		} else {
-			ctx.AttentionMask = ctx.AttentionMask[:0]
-			for i := 0; i < seqLen; i++ {
+		ctx.AttentionMask = ctx.AttentionMask[:0]
+		for i := 0; i < seqLen; i++ {
+			if attnMask != nil && i < len(attnMask) {
+				ctx.AttentionMask = append(ctx.AttentionMask, attnMask[i])
+			} else {
 				ctx.AttentionMask = append(ctx.AttentionMask, 1)
 			}
 		}
@@ -272,6 +297,15 @@ func (ctx *InferenceContext) EmbedTokenIDs(inputIDs []int, attnMask []int8) ([][
 
 // Forward executes the transformer encoder, mean pooling, and L2 normalization.
 func (ctx *InferenceContext) Forward(seqLen int, out []float32) []float32 {
+	if ctx == nil || ctx.Model == nil || seqLen <= 0 {
+		return out
+	}
+	if seqLen > MaxSeqLen {
+		seqLen = MaxSeqLen
+	}
+	if len(out) < HiddenSize {
+		out = make([]float32, HiddenSize)
+	}
 	m := ctx.Model
 
 	matMul := MatVecMulAddScalar
@@ -292,38 +326,97 @@ func (ctx *InferenceContext) Forward(seqLen int, out []float32) []float32 {
 
 	// 1. Embeddings lookup & LayerNorm
 	vocabLimit := m.VocabSize()
+	if vocabLimit <= 0 {
+		return out
+	}
+
 	for t := 0; t < seqLen; t++ {
-		id := ctx.InputIDs[t]
+		id := tokenizer.UNK_ID
+		if t < len(ctx.InputIDs) {
+			id = ctx.InputIDs[t]
+		}
 		if id < 0 || id >= vocabLimit {
-			id = tokenizer.UNK_ID
+			if tokenizer.UNK_ID >= 0 && tokenizer.UNK_ID < vocabLimit {
+				id = tokenizer.UNK_ID
+			} else {
+				id = 0
+			}
 		}
 
 		pOffset := t * HiddenSize
 		hOffset := t * HiddenSize
 
-		pEmb := m.PositionEmbeddings[pOffset : pOffset+HiddenSize]
-		tEmb := m.TokenTypeEmbeddings[:HiddenSize]
+		var pEmb []float32
+		if pOffset+HiddenSize <= len(m.PositionEmbeddings) {
+			pEmb = m.PositionEmbeddings[pOffset : pOffset+HiddenSize]
+		}
+		var tEmb []float32
+		if len(m.TokenTypeEmbeddings) >= HiddenSize {
+			tEmb = m.TokenTypeEmbeddings[:HiddenSize]
+		}
 		sumSlice := ctx.Residual[hOffset : hOffset+HiddenSize]
 
 		switch m.Precision {
 		case PrecisionBF16:
 			wOffset := id * HiddenSize
-			wWords := m.BF16WordEmbeddings[wOffset : wOffset+HiddenSize]
+			var wWords []uint16
+			if wOffset+HiddenSize <= len(m.BF16WordEmbeddings) {
+				wWords = m.BF16WordEmbeddings[wOffset : wOffset+HiddenSize]
+			}
 			for d := 0; d < HiddenSize; d++ {
-				sumSlice[d] = BFloat16ToFloat32(wWords[d]) + pEmb[d] + tEmb[d]
+				var val float32
+				if d < len(wWords) {
+					val = BFloat16ToFloat32(wWords[d])
+				}
+				if d < len(pEmb) {
+					val += pEmb[d]
+				}
+				if d < len(tEmb) {
+					val += tEmb[d]
+				}
+				sumSlice[d] = val
 			}
 		case PrecisionINT8:
 			wOffset := id * HiddenSize
-			qScale := m.QWordEmbeddings.Scale[id]
-			qWeights := m.QWordEmbeddings.Weight[wOffset : wOffset+HiddenSize]
+			var qScale float32 = 1.0
+			if id < len(m.QWordEmbeddings.Scale) {
+				qScale = m.QWordEmbeddings.Scale[id]
+			}
+			var qWeights []int8
+			if wOffset+HiddenSize <= len(m.QWordEmbeddings.Weight) {
+				qWeights = m.QWordEmbeddings.Weight[wOffset : wOffset+HiddenSize]
+			}
 			for d := 0; d < HiddenSize; d++ {
-				sumSlice[d] = float32(qWeights[d])*qScale + pEmb[d] + tEmb[d]
+				var val float32
+				if d < len(qWeights) {
+					val = float32(qWeights[d]) * qScale
+				}
+				if d < len(pEmb) {
+					val += pEmb[d]
+				}
+				if d < len(tEmb) {
+					val += tEmb[d]
+				}
+				sumSlice[d] = val
 			}
 		default:
 			wOffset := id * HiddenSize
-			wEmb := m.WordEmbeddings[wOffset : wOffset+HiddenSize]
+			var wEmb []float32
+			if wOffset+HiddenSize <= len(m.WordEmbeddings) {
+				wEmb = m.WordEmbeddings[wOffset : wOffset+HiddenSize]
+			}
 			for d := 0; d < HiddenSize; d++ {
-				sumSlice[d] = wEmb[d] + pEmb[d] + tEmb[d]
+				var val float32
+				if d < len(wEmb) {
+					val = wEmb[d]
+				}
+				if d < len(pEmb) {
+					val += pEmb[d]
+				}
+				if d < len(tEmb) {
+					val += tEmb[d]
+				}
+				sumSlice[d] = val
 			}
 		}
 

@@ -38,6 +38,9 @@ type QuantizedLayer struct {
 
 // QuantizeMatrix converts an FP32 matrix of shape [rows, cols] into per-row INT8 and FP32 scale factors.
 func QuantizeMatrix(weights []float32, rows, cols int) ([]int8, []float32) {
+	if rows <= 0 || cols <= 0 || len(weights) < rows*cols {
+		return nil, nil
+	}
 	qWeights := make([]int8, rows*cols)
 	scales := make([]float32, rows)
 
@@ -48,6 +51,9 @@ func QuantizeMatrix(weights []float32, rows, cols int) ([]int8, []float32) {
 		var maxAbs float32
 		for _, v := range row {
 			abs := float32(math.Abs(float64(v)))
+			if math.IsNaN(float64(abs)) {
+				continue
+			}
 			if abs > maxAbs {
 				maxAbs = abs
 			}
@@ -64,6 +70,10 @@ func QuantizeMatrix(weights []float32, rows, cols int) ([]int8, []float32) {
 
 		for c := 0; c < cols; c++ {
 			val := row[c] * invScale
+			if math.IsNaN(float64(val)) {
+				qWeights[rowOff+c] = 0
+				continue
+			}
 			// Round to nearest integer and clamp to [-127, 127]
 			rounded := int(math.Round(float64(val)))
 			if rounded > 127 {
@@ -80,6 +90,9 @@ func QuantizeMatrix(weights []float32, rows, cols int) ([]int8, []float32) {
 
 // QuantizeLinear creates a QuantizedLinear from FP32 weights and bias.
 func QuantizeLinear(weight, bias []float32, rows, cols int) QuantizedLinear {
+	if rows <= 0 || cols <= 0 {
+		return QuantizedLinear{Rows: rows, Cols: cols}
+	}
 	qW, scale := QuantizeMatrix(weight, rows, cols)
 	return QuantizedLinear{
 		Weight: qW,
@@ -93,7 +106,10 @@ func QuantizeLinear(weight, bias []float32, rows, cols int) QuantizedLinear {
 // QuantizeModel converts an FP32 Model into an in-memory INT8 Quantized Model,
 // releasing the heavy FP32 weight slices to reduce memory usage by ~3.6x.
 func QuantizeModel(m *Model) *Model {
-	if m.IsQuantized {
+	if m == nil {
+		return nil
+	}
+	if m.IsQuantized && m.Precision == PrecisionINT8 {
 		return m
 	}
 
@@ -109,10 +125,12 @@ func QuantizeModel(m *Model) *Model {
 
 	// 1. Quantize Word Embeddings
 	vocabSize := len(m.WordEmbeddings) / HiddenSize
-	qW, qScale := QuantizeMatrix(m.WordEmbeddings, vocabSize, HiddenSize)
-	qModel.QWordEmbeddings = QuantizedWordEmbeddings{
-		Weight: qW,
-		Scale:  qScale,
+	if vocabSize > 0 {
+		qW, qScale := QuantizeMatrix(m.WordEmbeddings, vocabSize, HiddenSize)
+		qModel.QWordEmbeddings = QuantizedWordEmbeddings{
+			Weight: qW,
+			Scale:  qScale,
+		}
 	}
 
 	// 2. Quantize 12 Transformer Layers

@@ -25,6 +25,9 @@ func reduceSumFloat32s(v simd.Float32s) float32 {
 // MatVecMulAddSIMD computes out = x * W^T + bias using SIMD vector FMA operations.
 // It unrolls 4 rows at a time to keep x in CPU registers and hide FMA latency across 4 independent vector accumulators.
 func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float32, inDim, outDim int) {
+	if inDim <= 0 || outDim <= 0 || len(x) < inDim || len(out) < outDim || len(weight) < inDim*outDim {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := inDim - (inDim % vecLen)
 
@@ -92,14 +95,30 @@ func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float
 		}
 
 		if bias != nil {
-			dot0 += bias[j]
-			dot1 += bias[j+1]
-			dot2 += bias[j+2]
-			dot3 += bias[j+3]
-			dot4 += bias[j+4]
-			dot5 += bias[j+5]
-			dot6 += bias[j+6]
-			dot7 += bias[j+7]
+			if j < len(bias) {
+				dot0 += bias[j]
+			}
+			if j+1 < len(bias) {
+				dot1 += bias[j+1]
+			}
+			if j+2 < len(bias) {
+				dot2 += bias[j+2]
+			}
+			if j+3 < len(bias) {
+				dot3 += bias[j+3]
+			}
+			if j+4 < len(bias) {
+				dot4 += bias[j+4]
+			}
+			if j+5 < len(bias) {
+				dot5 += bias[j+5]
+			}
+			if j+6 < len(bias) {
+				dot6 += bias[j+6]
+			}
+			if j+7 < len(bias) {
+				dot7 += bias[j+7]
+			}
 		}
 
 		out[j] = dot0
@@ -116,7 +135,7 @@ func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float
 	for ; j < outDim; j++ {
 		wRow := weight[j*inDim : (j+1)*inDim]
 		var dot float32
-		if bias != nil {
+		if bias != nil && j < len(bias) {
 			dot = bias[j]
 		}
 
@@ -140,6 +159,9 @@ func MatVecMulAddSIMD(x []float32, weight []float32, bias []float32, out []float
 
 // MatVecMulAddINT8SIMD computes out = (x * W_int8^T) * scale + bias using SIMD vector FMA operations.
 func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []float32, out []float32, inDim, outDim int) {
+	if inDim <= 0 || outDim <= 0 || len(x) < inDim || len(out) < outDim || len(weight) < inDim*outDim || len(scale) < outDim {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := inDim - (inDim % vecLen)
 
@@ -198,10 +220,18 @@ func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []fl
 		res3 := dot3 * scale[j+3]
 
 		if bias != nil {
-			res0 += bias[j]
-			res1 += bias[j+1]
-			res2 += bias[j+2]
-			res3 += bias[j+3]
+			if j < len(bias) {
+				res0 += bias[j]
+			}
+			if j+1 < len(bias) {
+				res1 += bias[j+1]
+			}
+			if j+2 < len(bias) {
+				res2 += bias[j+2]
+			}
+			if j+3 < len(bias) {
+				res3 += bias[j+3]
+			}
 		}
 
 		out[j] = res0
@@ -230,7 +260,7 @@ func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []fl
 		}
 
 		res := dot * scale[j]
-		if bias != nil {
+		if bias != nil && j < len(bias) {
 			res += bias[j]
 		}
 		out[j] = res
@@ -239,6 +269,9 @@ func MatVecMulAddINT8SIMD(x []float32, weight []int8, scale []float32, bias []fl
 
 // MatVecMulAddBF16SIMD computes out = x * W_bf16^T + bias using SIMD vector FMA operations.
 func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []float32, inDim, outDim int) {
+	if inDim <= 0 || outDim <= 0 || len(x) < inDim || len(out) < outDim || len(weight) < inDim*outDim {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := inDim - (inDim % vecLen)
 
@@ -253,10 +286,18 @@ func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []fl
 
 		var dot0, dot1, dot2, dot3 float32
 		if bias != nil {
-			dot0 = bias[j]
-			dot1 = bias[j+1]
-			dot2 = bias[j+2]
-			dot3 = bias[j+3]
+			if j < len(bias) {
+				dot0 = bias[j]
+			}
+			if j+1 < len(bias) {
+				dot1 = bias[j+1]
+			}
+			if j+2 < len(bias) {
+				dot2 = bias[j+2]
+			}
+			if j+3 < len(bias) {
+				dot3 = bias[j+3]
+			}
 		}
 
 		acc0 := simd.BroadcastFloat32s(0)
@@ -309,7 +350,7 @@ func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []fl
 	for ; j < outDim; j++ {
 		wRow := weight[j*inDim : (j+1)*inDim]
 		var dot float32
-		if bias != nil {
+		if bias != nil && j < len(bias) {
 			dot = bias[j]
 		}
 		acc0 := simd.BroadcastFloat32s(0)
@@ -334,6 +375,9 @@ func MatVecMulAddBF16SIMD(x []float32, weight []uint16, bias []float32, out []fl
 
 // LayerNormSIMD computes LayerNorm with SIMD vectorization.
 func LayerNormSIMD(x []float32, weight, bias, out []float32, dim int, eps float32) {
+	if dim <= 0 || len(x) < dim || len(out) < dim || len(weight) < dim || len(bias) < dim {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := dim - (dim % vecLen)
 
@@ -365,7 +409,13 @@ func LayerNormSIMD(x []float32, weight, bias, out []float32, dim int, eps float3
 		tailVar += d * d
 	}
 	variance := (reduceSumFloat32s(accVar) + tailVar) / float32(dim)
+	if math.IsNaN(float64(variance)) || variance < 0 {
+		variance = 0
+	}
 	invStd := float32(1.0 / math.Sqrt(float64(variance+eps)))
+	if math.IsNaN(float64(invStd)) || math.IsInf(float64(invStd), 0) {
+		invStd = 0
+	}
 
 	// 3. Normalize, scale, and shift
 	vInvStd := simd.BroadcastFloat32s(invStd)
@@ -393,6 +443,9 @@ func GELUSIMD(x, out []float32, n int) {
 
 // GELUApproxSIMD computes fast polynomial approximation with SIMD.
 func GELUApproxSIMD(x, out []float32, n int) {
+	if n <= 0 || len(x) < n || len(out) < n {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := n - (n % vecLen)
 
@@ -431,6 +484,9 @@ func GELUApproxSIMD(x, out []float32, n int) {
 
 // L2NormalizeSIMD normalizes a vector with SIMD.
 func L2NormalizeSIMD(v, out []float32, dim int) {
+	if dim <= 0 || len(v) < dim || len(out) < dim {
+		return
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := dim - (dim % vecLen)
 
@@ -446,6 +502,9 @@ func L2NormalizeSIMD(v, out []float32, dim int) {
 	}
 
 	sumSq := reduceSumFloat32s(acc) + tailSum
+	if math.IsNaN(float64(sumSq)) || sumSq < 0 {
+		sumSq = 0
+	}
 	norm := float32(math.Sqrt(math.Max(float64(sumSq), 1e-12)))
 	invNorm := float32(1.0) / norm
 	vInvNorm := simd.BroadcastFloat32s(invNorm)
@@ -462,6 +521,9 @@ func L2NormalizeSIMD(v, out []float32, dim int) {
 
 // CosineSimilaritySIMD computes cosine similarity between two vectors using SIMD dot products.
 func CosineSimilaritySIMD(a, b []float32, dim int) float32 {
+	if dim <= 0 || len(a) < dim || len(b) < dim {
+		return 0
+	}
 	vecLen := simd.BroadcastFloat32s(0).Len()
 	vecLimit := dim - (dim % vecLen)
 
@@ -489,8 +551,21 @@ func CosineSimilaritySIMD(a, b []float32, dim int) float32 {
 	nA := reduceSumFloat32s(accNA) + tailNA
 	nB := reduceSumFloat32s(accNB) + tailNB
 
-	if nA == 0 || nB == 0 {
+	if nA <= 0 || nB <= 0 || math.IsNaN(float64(nA)) || math.IsNaN(float64(nB)) || math.IsNaN(float64(dot)) {
 		return 0
 	}
-	return dot / float32(math.Sqrt(float64(nA))*math.Sqrt(float64(nB)))
+	denom := float32(math.Sqrt(float64(nA)) * math.Sqrt(float64(nB)))
+	if denom <= 0 || math.IsNaN(float64(denom)) {
+		return 0
+	}
+	res := dot / denom
+	if res > 1.0 {
+		res = 1.0
+	} else if res < -1.0 {
+		res = -1.0
+	}
+	if math.IsNaN(float64(res)) {
+		return 0
+	}
+	return res
 }

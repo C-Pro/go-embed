@@ -109,6 +109,9 @@ func (m *Model) VocabSize() int {
 }
 
 func readTensorF32Flex(st *safetensors.Safetensors, name string) ([]float32, error) {
+	if st == nil {
+		return nil, fmt.Errorf("safetensors is nil")
+	}
 	if t, err := st.TensorF32View(name); err == nil {
 		return t, nil
 	}
@@ -122,6 +125,9 @@ func readTensorF32Flex(st *safetensors.Safetensors, name string) ([]float32, err
 }
 
 func readTensorBF16Flex(st *safetensors.Safetensors, name string) ([]uint16, error) {
+	if st == nil {
+		return nil, fmt.Errorf("safetensors is nil")
+	}
 	if t, err := st.TensorBF16View(name); err == nil {
 		return t, nil
 	}
@@ -135,6 +141,9 @@ func readTensorBF16Flex(st *safetensors.Safetensors, name string) ([]uint16, err
 }
 
 func readTensorI8Flex(st *safetensors.Safetensors, name string) ([]int8, error) {
+	if st == nil {
+		return nil, fmt.Errorf("safetensors is nil")
+	}
 	if t, err := st.TensorI8View(name); err == nil {
 		return t, nil
 	}
@@ -145,6 +154,127 @@ func readTensorI8Flex(st *safetensors.Safetensors, name string) ([]int8, error) 
 		}
 	}
 	return nil, fmt.Errorf("tensor %q (and standard prefixes) not found in safetensors", name)
+}
+
+// Validate verifies that all tensor weights, biases, and parameters match the expected network architecture dimensions.
+func (m *Model) Validate() error {
+	if m == nil {
+		return fmt.Errorf("model is nil")
+	}
+	if m.Tok == nil {
+		return fmt.Errorf("model tokenizer is nil")
+	}
+	vocabSize := m.VocabSize()
+	if vocabSize <= 0 {
+		return fmt.Errorf("invalid vocabulary size %d", vocabSize)
+	}
+
+	if len(m.PositionEmbeddings) < MaxSeqLen*HiddenSize {
+		return fmt.Errorf("position embeddings len %d < expected %d", len(m.PositionEmbeddings), MaxSeqLen*HiddenSize)
+	}
+	if len(m.EmbeddingsNormW) != HiddenSize || len(m.EmbeddingsNormB) != HiddenSize {
+		return fmt.Errorf("embeddings norm weights/biases invalid length: W=%d, B=%d, expected %d", len(m.EmbeddingsNormW), len(m.EmbeddingsNormB), HiddenSize)
+	}
+
+	switch m.Precision {
+	case PrecisionBF16:
+		if len(m.BF16WordEmbeddings) < HiddenSize || len(m.BF16WordEmbeddings)%HiddenSize != 0 {
+			return fmt.Errorf("bf16 word embeddings len %d invalid (must be multiple of %d)", len(m.BF16WordEmbeddings), HiddenSize)
+		}
+		for i := 0; i < NumLayers; i++ {
+			l := &m.BF16Layers[i]
+			if len(l.Query.Weight) != HiddenSize*HiddenSize || len(l.Query.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d query invalid dimensions", i)
+			}
+			if len(l.Key.Weight) != HiddenSize*HiddenSize || len(l.Key.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d key invalid dimensions", i)
+			}
+			if len(l.Value.Weight) != HiddenSize*HiddenSize || len(l.Value.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d value invalid dimensions", i)
+			}
+			if len(l.Out.Weight) != HiddenSize*HiddenSize || len(l.Out.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d out invalid dimensions", i)
+			}
+			if len(l.AttnNormW) != HiddenSize || len(l.AttnNormB) != HiddenSize {
+				return fmt.Errorf("layer %d attn norm invalid dimensions", i)
+			}
+			if len(l.FFN1.Weight) != IntermediateSize*HiddenSize || len(l.FFN1.Bias) != IntermediateSize {
+				return fmt.Errorf("layer %d ffn1 invalid dimensions", i)
+			}
+			if len(l.FFN2.Weight) != HiddenSize*IntermediateSize || len(l.FFN2.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d ffn2 invalid dimensions", i)
+			}
+			if len(l.FFNNormW) != HiddenSize || len(l.FFNNormB) != HiddenSize {
+				return fmt.Errorf("layer %d ffn norm invalid dimensions", i)
+			}
+		}
+	case PrecisionINT8:
+		if len(m.QWordEmbeddings.Weight) < HiddenSize || len(m.QWordEmbeddings.Weight)%HiddenSize != 0 {
+			return fmt.Errorf("int8 word embeddings len %d invalid", len(m.QWordEmbeddings.Weight))
+		}
+		if len(m.QWordEmbeddings.Scale) != len(m.QWordEmbeddings.Weight)/HiddenSize {
+			return fmt.Errorf("int8 word embeddings scale len %d != tokens %d", len(m.QWordEmbeddings.Scale), len(m.QWordEmbeddings.Weight)/HiddenSize)
+		}
+		for i := 0; i < NumLayers; i++ {
+			l := &m.QLayers[i]
+			if len(l.Query.Weight) != HiddenSize*HiddenSize || len(l.Query.Scale) != HiddenSize || len(l.Query.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d query invalid dimensions", i)
+			}
+			if len(l.Key.Weight) != HiddenSize*HiddenSize || len(l.Key.Scale) != HiddenSize || len(l.Key.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d key invalid dimensions", i)
+			}
+			if len(l.Value.Weight) != HiddenSize*HiddenSize || len(l.Value.Scale) != HiddenSize || len(l.Value.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d value invalid dimensions", i)
+			}
+			if len(l.Out.Weight) != HiddenSize*HiddenSize || len(l.Out.Scale) != HiddenSize || len(l.Out.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d out invalid dimensions", i)
+			}
+			if len(l.AttnNormW) != HiddenSize || len(l.AttnNormB) != HiddenSize {
+				return fmt.Errorf("layer %d attn norm invalid dimensions", i)
+			}
+			if len(l.FFN1.Weight) != IntermediateSize*HiddenSize || len(l.FFN1.Scale) != IntermediateSize || len(l.FFN1.Bias) != IntermediateSize {
+				return fmt.Errorf("layer %d ffn1 invalid dimensions", i)
+			}
+			if len(l.FFN2.Weight) != HiddenSize*IntermediateSize || len(l.FFN2.Scale) != HiddenSize || len(l.FFN2.Bias) != HiddenSize {
+				return fmt.Errorf("layer %d ffn2 invalid dimensions", i)
+			}
+			if len(l.FFNNormW) != HiddenSize || len(l.FFNNormB) != HiddenSize {
+				return fmt.Errorf("layer %d ffn norm invalid dimensions", i)
+			}
+		}
+	default:
+		if len(m.WordEmbeddings) < HiddenSize || len(m.WordEmbeddings)%HiddenSize != 0 {
+			return fmt.Errorf("word embeddings len %d invalid (must be multiple of %d)", len(m.WordEmbeddings), HiddenSize)
+		}
+		for i := 0; i < NumLayers; i++ {
+			l := &m.Layers[i]
+			if len(l.QueryWeight) != HiddenSize*HiddenSize || len(l.QueryBias) != HiddenSize {
+				return fmt.Errorf("layer %d query invalid dimensions", i)
+			}
+			if len(l.KeyWeight) != HiddenSize*HiddenSize || len(l.KeyBias) != HiddenSize {
+				return fmt.Errorf("layer %d key invalid dimensions", i)
+			}
+			if len(l.ValueWeight) != HiddenSize*HiddenSize || len(l.ValueBias) != HiddenSize {
+				return fmt.Errorf("layer %d value invalid dimensions", i)
+			}
+			if len(l.OutWeight) != HiddenSize*HiddenSize || len(l.OutBias) != HiddenSize {
+				return fmt.Errorf("layer %d out invalid dimensions", i)
+			}
+			if len(l.AttnNormW) != HiddenSize || len(l.AttnNormB) != HiddenSize {
+				return fmt.Errorf("layer %d attn norm invalid dimensions", i)
+			}
+			if len(l.FFN1Weight) != IntermediateSize*HiddenSize || len(l.FFN1Bias) != IntermediateSize {
+				return fmt.Errorf("layer %d ffn1 invalid dimensions", i)
+			}
+			if len(l.FFN2Weight) != HiddenSize*IntermediateSize || len(l.FFN2Bias) != HiddenSize {
+				return fmt.Errorf("layer %d ffn2 invalid dimensions", i)
+			}
+			if len(l.FFNNormW) != HiddenSize || len(l.FFNNormB) != HiddenSize {
+				return fmt.Errorf("layer %d ffn norm invalid dimensions", i)
+			}
+		}
+	}
+	return nil
 }
 
 // loadFP32Model directly memory-maps a full-precision model.safetensors file.
@@ -240,6 +370,10 @@ func loadFP32Model(modelPath, tokenizerPath string) (m *Model, err error) {
 		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := m.Validate(); err != nil {
+		return nil, fmt.Errorf("model validation failed: %w", err)
 	}
 
 	return m, nil
@@ -363,6 +497,10 @@ func LoadBF16Model(modelPath, tokenizerPath string) (m *Model, err error) {
 		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := m.Validate(); err != nil {
+		return nil, fmt.Errorf("model validation failed: %w", err)
 	}
 
 	return m, nil
@@ -501,6 +639,10 @@ func LoadQuantizedModel(modelPath, tokenizerPath string) (m *Model, err error) {
 		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := m.Validate(); err != nil {
+		return nil, fmt.Errorf("model validation failed: %w", err)
 	}
 
 	return m, nil

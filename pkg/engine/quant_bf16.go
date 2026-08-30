@@ -27,6 +27,9 @@ func (p PrecisionMode) String() string {
 // Float32ToBFloat16 converts an FP32 value to BFloat16 with round-to-nearest-even.
 func Float32ToBFloat16(f float32) uint16 {
 	bits := math.Float32bits(f)
+	if math.IsNaN(float64(f)) {
+		return uint16((bits >> 16) | 0x0040) // Return quiet NaN
+	}
 	// Round to nearest even
 	lsb := (bits >> 16) & 1
 	roundingBias := uint32(0x7FFF) + lsb
@@ -76,6 +79,9 @@ type BF16Layer struct {
 // ConvertToBF16Model converts an FP32 Model into an in-memory BFloat16 Model,
 // releasing FP32 weights to reduce memory footprint by 2x (449 MB -> 225 MB).
 func ConvertToBF16Model(m *Model) *Model {
+	if m == nil {
+		return nil
+	}
 	if m.Precision == PrecisionBF16 {
 		return m
 	}

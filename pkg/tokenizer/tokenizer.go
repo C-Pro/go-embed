@@ -47,11 +47,10 @@ type tokenizerJSON struct {
 	} `json:"added_tokens"`
 }
 
-// LoadFromFile loads the tokenizer from tokenizer.json.
-func LoadFromFile(path string) (*Tokenizer, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read tokenizer file %s: %w", path, err)
+// LoadFromBytes parses a tokenizer from tokenizer.json raw byte payload.
+func LoadFromBytes(data []byte) (*Tokenizer, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("tokenizer data is empty")
 	}
 
 	var tj tokenizerJSON
@@ -80,6 +79,9 @@ func LoadFromFile(path string) (*Tokenizer, error) {
 		piece, ok1 := item[0].(string)
 		scoreFloat, ok2 := item[1].(float64)
 		if !ok1 || !ok2 {
+			continue
+		}
+		if piece == "" {
 			continue
 		}
 
@@ -115,8 +117,20 @@ func LoadFromFile(path string) (*Tokenizer, error) {
 	return tok, nil
 }
 
+// LoadFromFile loads the tokenizer from tokenizer.json.
+func LoadFromFile(path string) (*Tokenizer, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tokenizer file %s: %w", path, err)
+	}
+	return LoadFromBytes(data)
+}
+
 // VocabSize returns the total vocabulary size.
 func (t *Tokenizer) VocabSize() int {
+	if t == nil {
+		return 0
+	}
 	return len(t.vocab)
 }
 
@@ -155,7 +169,9 @@ func (t *Tokenizer) Normalize(text string) string {
 	s := sb.String()
 
 	// 2. Collapse multi-spaces
-	s = t.multiSpaceRe.ReplaceAllString(s, " ")
+	if t != nil && t.multiSpaceRe != nil {
+		s = t.multiSpaceRe.ReplaceAllString(s, " ")
+	}
 
 	// 3. Trim right space if any
 	s = strings.TrimRight(s, " ")
@@ -171,6 +187,9 @@ type DPState struct {
 
 // EncodeRawIntoZeroAlloc tokenizes text into raw content tokens (without BOS/EOS) using provided runeBuf and dpBuf without heap allocations.
 func (t *Tokenizer) EncodeRawIntoZeroAlloc(text string, runeBuf []rune, tokens []int, dpBuf []DPState) ([]rune, []int) {
+	if t == nil || t.root == nil {
+		return runeBuf[:0], tokens[:0]
+	}
 	runeBuf = runeBuf[:0]
 
 	// 1. In-place rune decoding and normalization into runeBuf
@@ -287,7 +306,7 @@ func (t *Tokenizer) EncodeRawIntoZeroAlloc(text string, runeBuf []rune, tokens [
 	currIdx := n
 	for currIdx > 0 {
 		prev := dpBuf[currIdx]
-		if prev.PrevIdx < 0 {
+		if prev.PrevIdx < 0 || prev.PrevIdx >= currIdx {
 			break
 		}
 		tokens = append(tokens, prev.TokenID)
@@ -304,6 +323,9 @@ func (t *Tokenizer) EncodeRawIntoZeroAlloc(text string, runeBuf []rune, tokens [
 
 // EncodeRaw tokenizes text into raw content tokens (without BOS/EOS).
 func (t *Tokenizer) EncodeRaw(text string) []int {
+	if t == nil {
+		return []int{}
+	}
 	runeBuf := make([]rune, 0, len(text)+2)
 	tokens := make([]int, 0, 1024)
 	dpBuf := make([]DPState, 0, 1024)
@@ -325,17 +347,27 @@ func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []
 	if finalLen > maxLen {
 		finalLen = maxLen
 	}
+	if finalLen < 2 {
+		finalLen = 2
+	}
+
+	maxContent := finalLen - 2
+	if maxContent > numTokens {
+		maxContent = numTokens
+	}
 
 	if cap(inputIDs) < finalLen {
 		newIDs := make([]int, finalLen)
 		newIDs[0] = BOS_ID
-		copy(newIDs[1:], rawTokens[:finalLen-2])
+		if maxContent > 0 {
+			copy(newIDs[1:1+maxContent], rawTokens[:maxContent])
+		}
 		newIDs[finalLen-1] = EOS_ID
 		inputIDs = newIDs
 	} else {
 		inputIDs = inputIDs[:finalLen]
-		if finalLen > 2 {
-			copy(inputIDs[1:finalLen-1], rawTokens[:finalLen-2])
+		if maxContent > 0 {
+			copy(inputIDs[1:1+maxContent], rawTokens[:maxContent])
 		}
 		inputIDs[0] = BOS_ID
 		inputIDs[finalLen-1] = EOS_ID
@@ -383,6 +415,9 @@ func (t *Tokenizer) EncodePassage(text string, maxLen int) ([]int, []int8) {
 
 // Decode converts token IDs back into string.
 func (t *Tokenizer) Decode(tokens []int) string {
+	if t == nil || len(tokens) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	for _, id := range tokens {
 		if id == BOS_ID || id == EOS_ID || id == PAD_ID {
