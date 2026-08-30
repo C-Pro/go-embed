@@ -79,7 +79,7 @@ func TestParaphraseMultilingualMiniLM(t *testing.T) {
 				t.Fatalf("Embed text2 failed: %v", err)
 			}
 
-			sim := engine.CosineSimilarity(emb1, emb2)
+			sim := engine.CosineSimilarity(emb1[0], emb2[0])
 			t.Logf("[%s] Similarity: %.4f\n  T1: %q\n  T2: %q", tc.desc, sim, tc.text1, tc.text2)
 
 			if tc.isPair {
@@ -124,7 +124,7 @@ func TestParaphraseMultilingualMiniLM_BF16(t *testing.T) {
 		t.Fatalf("Embed failed: %v", err)
 	}
 
-	sim := engine.CosineSimilarity(emb1, emb2)
+	sim := engine.CosineSimilarity(emb1[0], emb2[0])
 	t.Logf("BF16 Paraphrase Similarity: %.4f", sim)
 	if sim < 0.75 {
 		t.Errorf("Expected high similarity in BF16, got %.4f", sim)

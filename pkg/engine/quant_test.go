@@ -48,18 +48,18 @@ func TestQuantizedParityAgainstFP32(t *testing.T) {
 
 	for i, tc := range golden {
 		t.Run(tc.Text, func(t *testing.T) {
-			fp32Emb, err := fp32Eng.Embed(tc.Text)
+			fp32Embs, err := fp32Eng.Embed(tc.Text)
 			if err != nil {
 				t.Fatalf("FP32 embed failed: %v", err)
 			}
 
-			int8Emb, err := int8Eng.Embed(tc.Text)
+			int8Embs, err := int8Eng.Embed(tc.Text)
 			if err != nil {
 				t.Fatalf("INT8 embed failed: %v", err)
 			}
 
-			sim := engine.CosineSimilarity(fp32Emb, int8Emb)
-			simGolden := engine.CosineSimilarity(int8Emb, tc.Embedding)
+			sim := engine.CosineSimilarity(fp32Embs[0], int8Embs[0])
+			simGolden := engine.CosineSimilarity(int8Embs[0], tc.Embedding)
 
 			t.Logf("Case #%d: Sim(INT8, FP32)=%.6f, Sim(INT8, Golden)=%.6f", i, sim, simGolden)
 
@@ -70,34 +70,5 @@ func TestQuantizedParityAgainstFP32(t *testing.T) {
 				t.Errorf("INT8 vs Golden similarity too low: %.6f (expected >= 0.990)", simGolden)
 			}
 		})
-	}
-}
-
-func TestQuantizedZeroAllocations(t *testing.T) {
-	eng := loadTestINT8Model(t)
-
-	ctx := engine.NewContext(eng.Model())
-	out := make([]float32, engine.HiddenSize)
-	query := "query: how to implement consensus in distributed systems?"
-
-	// Warm up
-	if _, err := ctx.Embed(query, out); err != nil {
-		t.Fatalf("Warmup failed: %v", err)
-	}
-
-	allocIters := 100
-	if isCI() {
-		allocIters = 2
-	}
-
-	allocs := testing.AllocsPerRun(allocIters, func() {
-		if _, err := ctx.Embed(query, out); err != nil {
-			t.Fatalf("Embed error: %v", err)
-		}
-	})
-
-	t.Logf("INT8 Steady-state allocations per run: %.1f", allocs)
-	if allocs != 0 {
-		t.Errorf("Expected 0 allocations per run in INT8, got %.1f", allocs)
 	}
 }

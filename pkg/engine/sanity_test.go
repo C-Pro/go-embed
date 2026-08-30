@@ -37,11 +37,11 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 
 		embsConsensus := make([][]float32, len(queriesConsensus))
 		for i, q := range queriesConsensus {
-			emb, err := eng.Embed(q.text)
+			embs, err := eng.Embed(q.text)
 			if err != nil {
 				t.Fatalf("Embed %s failed: %v", q.lang, err)
 			}
-			embsConsensus[i] = emb
+			embsConsensus[i] = embs[0]
 		}
 
 		for i := 0; i < len(queriesConsensus); i++ {
@@ -72,11 +72,11 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 
 		embsCat := make([][]float32, len(queriesCat))
 		for i, q := range queriesCat {
-			emb, err := eng.Embed(q.text)
+			embs, err := eng.Embed(q.text)
 			if err != nil {
 				t.Fatalf("Embed %s failed: %v", q.lang, err)
 			}
-			embsCat[i] = emb
+			embsCat[i] = embs[0]
 		}
 
 		for i := 0; i < len(queriesCat); i++ {
@@ -109,16 +109,16 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 		}
 
 		for _, p := range pairs {
-			embQ, err := eng.Embed(p.q)
+			embsQ, err := eng.Embed(p.q)
 			if err != nil {
 				t.Fatalf("Embed query failed: %v", err)
 			}
-			embNeg, err := eng.Embed(p.neg)
+			embsNeg, err := eng.Embed(p.neg)
 			if err != nil {
 				t.Fatalf("Embed negative failed: %v", err)
 			}
 
-			sim := engine.CosineSimilarity(embQ, embNeg)
+			sim := engine.CosineSimilarity(embsQ[0], embsNeg[0])
 			calSim := CalibratedCosineSim(sim)
 			t.Logf("Negative pair [%s]: Raw CosineSim = %.4f, Calibrated CosineSim = %.4f", p.name, sim, calSim)
 
@@ -136,21 +136,21 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 		relPassage := "passage: Consensus in distributed systems is the process of agreeing on a data value among multiple nodes or processes (e.g. Raft, Paxos)."
 		irrelPassage := "passage: Authentic Italian tiramisu recipe with mascarpone, espresso, and ladyfingers."
 
-		embQ, err := eng.Embed(query)
+		embsQ, err := eng.Embed(query)
 		if err != nil {
 			t.Fatalf("Embed query failed: %v", err)
 		}
-		embRel, err := eng.Embed(relPassage)
+		embsRel, err := eng.Embed(relPassage)
 		if err != nil {
 			t.Fatalf("Embed rel passage failed: %v", err)
 		}
-		embIrrel, err := eng.Embed(irrelPassage)
+		embsIrrel, err := eng.Embed(irrelPassage)
 		if err != nil {
 			t.Fatalf("Embed irrel passage failed: %v", err)
 		}
 
-		simRel := engine.CosineSimilarity(embQ, embRel)
-		simIrrel := engine.CosineSimilarity(embQ, embIrrel)
+		simRel := engine.CosineSimilarity(embsQ[0], embsRel[0])
+		simIrrel := engine.CosineSimilarity(embsQ[0], embsIrrel[0])
 		gap := simRel - simIrrel
 		calGap := CalibratedCosineSim(simRel) - CalibratedCosineSim(simIrrel)
 
@@ -168,16 +168,16 @@ func TestSemanticSanityAndCrossLingual(t *testing.T) {
 		sHealthy := "passage: The primary database node is healthy and accepting writes."
 		sCrashed := "passage: The primary database node crashed and lost data."
 
-		embHealthy, err := eng.Embed(sHealthy)
+		embsHealthy, err := eng.Embed(sHealthy)
 		if err != nil {
 			t.Fatalf("Embed healthy failed: %v", err)
 		}
-		embCrashed, err := eng.Embed(sCrashed)
+		embsCrashed, err := eng.Embed(sCrashed)
 		if err != nil {
 			t.Fatalf("Embed crashed failed: %v", err)
 		}
 
-		sim := engine.CosineSimilarity(embHealthy, embCrashed)
+		sim := engine.CosineSimilarity(embsHealthy[0], embsCrashed[0])
 		t.Logf("Hard Negatives Contrast: CosineSim = %.4f (Calibrated = %.4f)", sim, CalibratedCosineSim(sim))
 
 		// Ensure meaningful separation despite high lexical overlap

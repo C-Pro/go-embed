@@ -79,16 +79,21 @@ func main() {
 		}
 		input := prepareText(*text1)
 		t0 := time.Now()
-		emb, err := eng.Embed(input)
+		embs, err := eng.Embed(input)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Embed error: %v\n", err)
 			os.Exit(1)
 		}
 		elapsed := time.Since(t0)
 		fmt.Printf("Input: %q\n", input)
-		fmt.Printf("Generated %d-dim vector in %v:\n", len(emb), elapsed)
-		fmt.Printf("[%.5f, %.5f, %.5f, ..., %.5f, %.5f, %.5f]\n",
-			emb[0], emb[1], emb[2], emb[len(emb)-3], emb[len(emb)-2], emb[len(emb)-1])
+		fmt.Printf("Generated %d vector(s) (%d-dim) in %v:\n", len(embs), len(embs[0]), elapsed)
+		for i, emb := range embs {
+			if len(embs) > 1 {
+				fmt.Printf("Chunk [%d/%d]:\n", i+1, len(embs))
+			}
+			fmt.Printf("[%.5f, %.5f, %.5f, ..., %.5f, %.5f, %.5f]\n",
+				emb[0], emb[1], emb[2], emb[len(emb)-3], emb[len(emb)-2], emb[len(emb)-1])
+		}
 
 	case "sim":
 		if *text1 == "" || *text2 == "" {
@@ -102,13 +107,11 @@ func main() {
 		}
 
 		t0 := time.Now()
-		emb1, err1 := eng.Embed(in1)
-		emb2, err2 := eng.Embed(in2)
-		if err1 != nil || err2 != nil {
-			fmt.Fprintf(os.Stderr, "Embed error: %v / %v\n", err1, err2)
+		sim, err := eng.Similarity(in1, in2)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Similarity error: %v\n", err)
 			os.Exit(1)
 		}
-		sim := engine.CosineSimilarity(emb1, emb2)
 		elapsed := time.Since(t0)
 
 		fmt.Printf("Text 1: %q\n", in1)
@@ -148,27 +151,32 @@ func main() {
 				}
 
 				t0 := time.Now()
-				eq, err1 := eng.Embed(q)
-				ep, err2 := eng.Embed(p)
-				if err1 != nil || err2 != nil {
-					fmt.Printf("Error: %v / %v\n", err1, err2)
+				sim, err := eng.Similarity(q, p)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
 					continue
 				}
-				sim := engine.CosineSimilarity(eq, ep)
 				fmt.Printf("Cosine Similarity: %.4f (latency: %v)\n", sim, time.Since(t0))
 				continue
 			}
 
 			input := prepareText(line)
 			t0 := time.Now()
-			emb, err := eng.Embed(input)
+			embs, err := eng.Embed(input)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				continue
 			}
 			elapsed := time.Since(t0)
-			fmt.Printf("Embedding (%d dims, latency %v):\n[%.4f, %.4f, %.4f, ..., %.4f, %.4f, %.4f]\n\n",
-				len(emb), elapsed, emb[0], emb[1], emb[2], emb[len(emb)-3], emb[len(emb)-2], emb[len(emb)-1])
+			fmt.Printf("Generated %d vector(s) (%d-dim, latency %v):\n", len(embs), len(embs[0]), elapsed)
+			for i, emb := range embs {
+				if len(embs) > 1 {
+					fmt.Printf("Chunk [%d/%d]: ", i+1, len(embs))
+				}
+				fmt.Printf("[%.4f, %.4f, %.4f, ..., %.4f, %.4f, %.4f]\n",
+					emb[0], emb[1], emb[2], emb[len(emb)-3], emb[len(emb)-2], emb[len(emb)-1])
+			}
+			fmt.Println()
 		}
 	}
 }

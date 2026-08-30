@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"strings"
 
 	"go-embed/pkg/safetensors"
 	"go-embed/pkg/tokenizer"
@@ -66,21 +68,22 @@ type Model struct {
 	QLayers         [NumLayers]QuantizedLayer
 
 	Tok *tokenizer.Tokenizer
+	st  *safetensors.Safetensors
+}
+
+// Close releases any memory-mapped file resources held by the model.
+func (m *Model) Close() error {
+	if m.st != nil {
+		err := m.st.Close()
+		m.st = nil
+		return err
+	}
+	return nil
 }
 
 // LoadModel loads the model directly from a safetensors file and tokenizer.json in FP32 precision.
 func LoadModel(modelPath, tokenizerPath string) (*Model, error) {
 	return LoadModelWithPrecision(modelPath, tokenizerPath, PrecisionFP32)
-}
-
-// LoadBF16Model loads the model directly and converts all linear layers and embeddings to BFloat16.
-func LoadBF16Model(modelPath, tokenizerPath string) (*Model, error) {
-	return LoadModelWithPrecision(modelPath, tokenizerPath, PrecisionBF16)
-}
-
-// LoadQuantizedModel loads the model directly and converts all linear layers and embeddings to INT8.
-func LoadQuantizedModel(modelPath, tokenizerPath string) (*Model, error) {
-	return LoadModelWithPrecision(modelPath, tokenizerPath, PrecisionINT8)
 }
 
 // LoadModelWithOptions loads model weights with optional INT8 quantization (backwards compatible).
@@ -106,20 +109,46 @@ func (m *Model) VocabSize() int {
 }
 
 func readTensorF32Flex(st *safetensors.Safetensors, name string) ([]float32, error) {
-	if t, err := st.ReadTensorF32(name); err == nil {
+	if t, err := st.TensorF32View(name); err == nil {
 		return t, nil
 	}
 	prefixes := []string{"roberta.", "bert.", "transformer.", "model."}
 	for _, p := range prefixes {
-		if t, err := st.ReadTensorF32(p + name); err == nil {
+		if t, err := st.TensorF32View(p + name); err == nil {
 			return t, nil
 		}
 	}
 	return nil, fmt.Errorf("tensor %q (and standard prefixes) not found in safetensors", name)
 }
 
-// LoadModelWithPrecision loads model weights with the specified precision mode.
-func LoadModelWithPrecision(modelPath, tokenizerPath string, prec PrecisionMode) (*Model, error) {
+func readTensorBF16Flex(st *safetensors.Safetensors, name string) ([]uint16, error) {
+	if t, err := st.TensorBF16View(name); err == nil {
+		return t, nil
+	}
+	prefixes := []string{"roberta.", "bert.", "transformer.", "model."}
+	for _, p := range prefixes {
+		if t, err := st.TensorBF16View(p + name); err == nil {
+			return t, nil
+		}
+	}
+	return nil, fmt.Errorf("tensor %q (and standard prefixes) not found in safetensors", name)
+}
+
+func readTensorI8Flex(st *safetensors.Safetensors, name string) ([]int8, error) {
+	if t, err := st.TensorI8View(name); err == nil {
+		return t, nil
+	}
+	prefixes := []string{"roberta.", "bert.", "transformer.", "model."}
+	for _, p := range prefixes {
+		if t, err := st.TensorI8View(p + name); err == nil {
+			return t, nil
+		}
+	}
+	return nil, fmt.Errorf("tensor %q (and standard prefixes) not found in safetensors", name)
+}
+
+// loadFP32Model directly memory-maps a full-precision model.safetensors file.
+func loadFP32Model(modelPath, tokenizerPath string) (m *Model, err error) {
 	tok, err := tokenizer.LoadFromFile(tokenizerPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
@@ -129,92 +158,501 @@ func LoadModelWithPrecision(modelPath, tokenizerPath string, prec PrecisionMode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open safetensors file: %w", err)
 	}
-	defer st.Close()
+	defer func() {
+		if err != nil {
+			st.Close()
+		}
+	}()
 
-	m := &Model{Tok: tok}
+	m = &Model{
+		Tok:       tok,
+		Precision: PrecisionFP32,
+		st:        st,
+	}
 
-	// 1. Embeddings
-	var readErr error
-	if m.WordEmbeddings, readErr = readTensorF32Flex(st, "embeddings.word_embeddings.weight"); readErr != nil {
-		return nil, readErr
+	if m.WordEmbeddings, err = readTensorF32Flex(st, "embeddings.word_embeddings.weight"); err != nil {
+		return nil, err
 	}
-	if m.PositionEmbeddings, readErr = readTensorF32Flex(st, "embeddings.position_embeddings.weight"); readErr != nil {
-		return nil, readErr
+	if m.PositionEmbeddings, err = readTensorF32Flex(st, "embeddings.position_embeddings.weight"); err != nil {
+		return nil, err
 	}
-	if m.TokenTypeEmbeddings, readErr = readTensorF32Flex(st, "embeddings.token_type_embeddings.weight"); readErr != nil {
-		// Optional in some architectures
+	if m.TokenTypeEmbeddings, err = readTensorF32Flex(st, "embeddings.token_type_embeddings.weight"); err != nil {
 		m.TokenTypeEmbeddings = make([]float32, HiddenSize)
+		err = nil
 	}
-	if m.EmbeddingsNormW, readErr = readTensorF32Flex(st, "embeddings.LayerNorm.weight"); readErr != nil {
-		return nil, readErr
+	if m.EmbeddingsNormW, err = readTensorF32Flex(st, "embeddings.LayerNorm.weight"); err != nil {
+		return nil, err
 	}
-	if m.EmbeddingsNormB, readErr = readTensorF32Flex(st, "embeddings.LayerNorm.bias"); readErr != nil {
-		return nil, readErr
+	if m.EmbeddingsNormB, err = readTensorF32Flex(st, "embeddings.LayerNorm.bias"); err != nil {
+		return nil, err
 	}
 
-	// 2. 12 Transformer Layers
 	for i := 0; i < NumLayers; i++ {
 		prefix := fmt.Sprintf("encoder.layer.%d.", i)
 		l := &m.Layers[i]
 
-		if l.QueryWeight, readErr = readTensorF32Flex(st, prefix+"attention.self.query.weight"); readErr != nil {
-			return nil, readErr
+		if l.QueryWeight, err = readTensorF32Flex(st, prefix+"attention.self.query.weight"); err != nil {
+			return nil, err
 		}
-		if l.QueryBias, readErr = readTensorF32Flex(st, prefix+"attention.self.query.bias"); readErr != nil {
-			return nil, readErr
+		if l.QueryBias, err = readTensorF32Flex(st, prefix+"attention.self.query.bias"); err != nil {
+			return nil, err
 		}
-		if l.KeyWeight, readErr = readTensorF32Flex(st, prefix+"attention.self.key.weight"); readErr != nil {
-			return nil, readErr
+		if l.KeyWeight, err = readTensorF32Flex(st, prefix+"attention.self.key.weight"); err != nil {
+			return nil, err
 		}
-		if l.KeyBias, readErr = readTensorF32Flex(st, prefix+"attention.self.key.bias"); readErr != nil {
-			return nil, readErr
+		if l.KeyBias, err = readTensorF32Flex(st, prefix+"attention.self.key.bias"); err != nil {
+			return nil, err
 		}
-		if l.ValueWeight, readErr = readTensorF32Flex(st, prefix+"attention.self.value.weight"); readErr != nil {
-			return nil, readErr
+		if l.ValueWeight, err = readTensorF32Flex(st, prefix+"attention.self.value.weight"); err != nil {
+			return nil, err
 		}
-		if l.ValueBias, readErr = readTensorF32Flex(st, prefix+"attention.self.value.bias"); readErr != nil {
-			return nil, readErr
+		if l.ValueBias, err = readTensorF32Flex(st, prefix+"attention.self.value.bias"); err != nil {
+			return nil, err
 		}
-		if l.OutWeight, readErr = readTensorF32Flex(st, prefix+"attention.output.dense.weight"); readErr != nil {
-			return nil, readErr
+		if l.OutWeight, err = readTensorF32Flex(st, prefix+"attention.output.dense.weight"); err != nil {
+			return nil, err
 		}
-		if l.OutBias, readErr = readTensorF32Flex(st, prefix+"attention.output.dense.bias"); readErr != nil {
-			return nil, readErr
+		if l.OutBias, err = readTensorF32Flex(st, prefix+"attention.output.dense.bias"); err != nil {
+			return nil, err
 		}
-		if l.AttnNormW, readErr = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.weight"); readErr != nil {
-			return nil, readErr
+		if l.AttnNormW, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.weight"); err != nil {
+			return nil, err
 		}
-		if l.AttnNormB, readErr = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.bias"); readErr != nil {
-			return nil, readErr
+		if l.AttnNormB, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.bias"); err != nil {
+			return nil, err
 		}
 
-		if l.FFN1Weight, readErr = readTensorF32Flex(st, prefix+"intermediate.dense.weight"); readErr != nil {
-			return nil, readErr
+		if l.FFN1Weight, err = readTensorF32Flex(st, prefix+"intermediate.dense.weight"); err != nil {
+			return nil, err
 		}
-		if l.FFN1Bias, readErr = readTensorF32Flex(st, prefix+"intermediate.dense.bias"); readErr != nil {
-			return nil, readErr
+		if l.FFN1Bias, err = readTensorF32Flex(st, prefix+"intermediate.dense.bias"); err != nil {
+			return nil, err
 		}
-		if l.FFN2Weight, readErr = readTensorF32Flex(st, prefix+"output.dense.weight"); readErr != nil {
-			return nil, readErr
+		if l.FFN2Weight, err = readTensorF32Flex(st, prefix+"output.dense.weight"); err != nil {
+			return nil, err
 		}
-		if l.FFN2Bias, readErr = readTensorF32Flex(st, prefix+"output.dense.bias"); readErr != nil {
-			return nil, readErr
+		if l.FFN2Bias, err = readTensorF32Flex(st, prefix+"output.dense.bias"); err != nil {
+			return nil, err
 		}
-		if l.FFNNormW, readErr = readTensorF32Flex(st, prefix+"output.LayerNorm.weight"); readErr != nil {
-			return nil, readErr
+		if l.FFNNormW, err = readTensorF32Flex(st, prefix+"output.LayerNorm.weight"); err != nil {
+			return nil, err
 		}
-		if l.FFNNormB, readErr = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); readErr != nil {
-			return nil, readErr
+		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
+			return nil, err
 		}
 	}
 
+	return m, nil
+}
+
+// LoadBF16Model memory-maps a pre-quantized BFloat16 safetensors file.
+func LoadBF16Model(modelPath, tokenizerPath string) (m *Model, err error) {
+	tok, err := tokenizer.LoadFromFile(tokenizerPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
+	}
+
+	st, err := safetensors.Open(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open safetensors file: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			st.Close()
+		}
+	}()
+
+	m = &Model{
+		Tok:       tok,
+		Precision: PrecisionBF16,
+		st:        st,
+	}
+
+	if m.BF16WordEmbeddings, err = readTensorBF16Flex(st, "embeddings.word_embeddings.weight"); err != nil {
+		return nil, err
+	}
+	if m.PositionEmbeddings, err = readTensorF32Flex(st, "embeddings.position_embeddings.weight"); err != nil {
+		return nil, err
+	}
+	if m.TokenTypeEmbeddings, err = readTensorF32Flex(st, "embeddings.token_type_embeddings.weight"); err != nil {
+		m.TokenTypeEmbeddings = make([]float32, HiddenSize)
+		err = nil
+	}
+	if m.EmbeddingsNormW, err = readTensorF32Flex(st, "embeddings.LayerNorm.weight"); err != nil {
+		return nil, err
+	}
+	if m.EmbeddingsNormB, err = readTensorF32Flex(st, "embeddings.LayerNorm.bias"); err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < NumLayers; i++ {
+		prefix := fmt.Sprintf("encoder.layer.%d.", i)
+		l := &m.BF16Layers[i]
+		f32L := &m.Layers[i]
+
+		l.Query.Rows = HiddenSize
+		l.Query.Cols = HiddenSize
+		if l.Query.Weight, err = readTensorBF16Flex(st, prefix+"attention.self.query.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.QueryBias, err = readTensorF32Flex(st, prefix+"attention.self.query.bias"); err != nil {
+			return nil, err
+		}
+		l.Query.Bias = f32L.QueryBias
+
+		l.Key.Rows = HiddenSize
+		l.Key.Cols = HiddenSize
+		if l.Key.Weight, err = readTensorBF16Flex(st, prefix+"attention.self.key.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.KeyBias, err = readTensorF32Flex(st, prefix+"attention.self.key.bias"); err != nil {
+			return nil, err
+		}
+		l.Key.Bias = f32L.KeyBias
+
+		l.Value.Rows = HiddenSize
+		l.Value.Cols = HiddenSize
+		if l.Value.Weight, err = readTensorBF16Flex(st, prefix+"attention.self.value.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.ValueBias, err = readTensorF32Flex(st, prefix+"attention.self.value.bias"); err != nil {
+			return nil, err
+		}
+		l.Value.Bias = f32L.ValueBias
+
+		l.Out.Rows = HiddenSize
+		l.Out.Cols = HiddenSize
+		if l.Out.Weight, err = readTensorBF16Flex(st, prefix+"attention.output.dense.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.OutBias, err = readTensorF32Flex(st, prefix+"attention.output.dense.bias"); err != nil {
+			return nil, err
+		}
+		l.Out.Bias = f32L.OutBias
+
+		if l.AttnNormW, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.weight"); err != nil {
+			return nil, err
+		}
+		if l.AttnNormB, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.bias"); err != nil {
+			return nil, err
+		}
+
+		l.FFN1.Rows = IntermediateSize
+		l.FFN1.Cols = HiddenSize
+		if l.FFN1.Weight, err = readTensorBF16Flex(st, prefix+"intermediate.dense.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.FFN1Bias, err = readTensorF32Flex(st, prefix+"intermediate.dense.bias"); err != nil {
+			return nil, err
+		}
+		l.FFN1.Bias = f32L.FFN1Bias
+
+		l.FFN2.Rows = HiddenSize
+		l.FFN2.Cols = IntermediateSize
+		if l.FFN2.Weight, err = readTensorBF16Flex(st, prefix+"output.dense.weight"); err != nil {
+			return nil, err
+		}
+		if f32L.FFN2Bias, err = readTensorF32Flex(st, prefix+"output.dense.bias"); err != nil {
+			return nil, err
+		}
+		l.FFN2.Bias = f32L.FFN2Bias
+
+		if l.FFNNormW, err = readTensorF32Flex(st, prefix+"output.LayerNorm.weight"); err != nil {
+			return nil, err
+		}
+		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
+			return nil, err
+		}
+	}
+
+	return m, nil
+}
+
+// LoadQuantizedModel memory-maps a pre-quantized INT8 safetensors file.
+func LoadQuantizedModel(modelPath, tokenizerPath string) (m *Model, err error) {
+	tok, err := tokenizer.LoadFromFile(tokenizerPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tokenizer: %w", err)
+	}
+
+	st, err := safetensors.Open(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open safetensors file: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			st.Close()
+		}
+	}()
+
+	m = &Model{
+		Tok:         tok,
+		Precision:   PrecisionINT8,
+		IsQuantized: true,
+		st:          st,
+	}
+
+	if m.QWordEmbeddings.Weight, err = readTensorI8Flex(st, "embeddings.word_embeddings.weight"); err != nil {
+		return nil, err
+	}
+	if m.QWordEmbeddings.Scale, err = readTensorF32Flex(st, "embeddings.word_embeddings.scale"); err != nil {
+		return nil, err
+	}
+	if m.PositionEmbeddings, err = readTensorF32Flex(st, "embeddings.position_embeddings.weight"); err != nil {
+		return nil, err
+	}
+	if m.TokenTypeEmbeddings, err = readTensorF32Flex(st, "embeddings.token_type_embeddings.weight"); err != nil {
+		m.TokenTypeEmbeddings = make([]float32, HiddenSize)
+		err = nil
+	}
+	if m.EmbeddingsNormW, err = readTensorF32Flex(st, "embeddings.LayerNorm.weight"); err != nil {
+		return nil, err
+	}
+	if m.EmbeddingsNormB, err = readTensorF32Flex(st, "embeddings.LayerNorm.bias"); err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < NumLayers; i++ {
+		prefix := fmt.Sprintf("encoder.layer.%d.", i)
+		l := &m.QLayers[i]
+
+		l.Query.Rows = HiddenSize
+		l.Query.Cols = HiddenSize
+		if l.Query.Weight, err = readTensorI8Flex(st, prefix+"attention.self.query.weight"); err != nil {
+			return nil, err
+		}
+		if l.Query.Scale, err = readTensorF32Flex(st, prefix+"attention.self.query.scale"); err != nil {
+			return nil, err
+		}
+		if l.Query.Bias, err = readTensorF32Flex(st, prefix+"attention.self.query.bias"); err != nil {
+			return nil, err
+		}
+
+		l.Key.Rows = HiddenSize
+		l.Key.Cols = HiddenSize
+		if l.Key.Weight, err = readTensorI8Flex(st, prefix+"attention.self.key.weight"); err != nil {
+			return nil, err
+		}
+		if l.Key.Scale, err = readTensorF32Flex(st, prefix+"attention.self.key.scale"); err != nil {
+			return nil, err
+		}
+		if l.Key.Bias, err = readTensorF32Flex(st, prefix+"attention.self.key.bias"); err != nil {
+			return nil, err
+		}
+
+		l.Value.Rows = HiddenSize
+		l.Value.Cols = HiddenSize
+		if l.Value.Weight, err = readTensorI8Flex(st, prefix+"attention.self.value.weight"); err != nil {
+			return nil, err
+		}
+		if l.Value.Scale, err = readTensorF32Flex(st, prefix+"attention.self.value.scale"); err != nil {
+			return nil, err
+		}
+		if l.Value.Bias, err = readTensorF32Flex(st, prefix+"attention.self.value.bias"); err != nil {
+			return nil, err
+		}
+
+		l.Out.Rows = HiddenSize
+		l.Out.Cols = HiddenSize
+		if l.Out.Weight, err = readTensorI8Flex(st, prefix+"attention.output.dense.weight"); err != nil {
+			return nil, err
+		}
+		if l.Out.Scale, err = readTensorF32Flex(st, prefix+"attention.output.dense.scale"); err != nil {
+			return nil, err
+		}
+		if l.Out.Bias, err = readTensorF32Flex(st, prefix+"attention.output.dense.bias"); err != nil {
+			return nil, err
+		}
+
+		if l.AttnNormW, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.weight"); err != nil {
+			return nil, err
+		}
+		if l.AttnNormB, err = readTensorF32Flex(st, prefix+"attention.output.LayerNorm.bias"); err != nil {
+			return nil, err
+		}
+
+		l.FFN1.Rows = IntermediateSize
+		l.FFN1.Cols = HiddenSize
+		if l.FFN1.Weight, err = readTensorI8Flex(st, prefix+"intermediate.dense.weight"); err != nil {
+			return nil, err
+		}
+		if l.FFN1.Scale, err = readTensorF32Flex(st, prefix+"intermediate.dense.scale"); err != nil {
+			return nil, err
+		}
+		if l.FFN1.Bias, err = readTensorF32Flex(st, prefix+"intermediate.dense.bias"); err != nil {
+			return nil, err
+		}
+
+		l.FFN2.Rows = HiddenSize
+		l.FFN2.Cols = IntermediateSize
+		if l.FFN2.Weight, err = readTensorI8Flex(st, prefix+"output.dense.weight"); err != nil {
+			return nil, err
+		}
+		if l.FFN2.Scale, err = readTensorF32Flex(st, prefix+"output.dense.scale"); err != nil {
+			return nil, err
+		}
+		if l.FFN2.Bias, err = readTensorF32Flex(st, prefix+"output.dense.bias"); err != nil {
+			return nil, err
+		}
+
+		if l.FFNNormW, err = readTensorF32Flex(st, prefix+"output.LayerNorm.weight"); err != nil {
+			return nil, err
+		}
+		if l.FFNNormB, err = readTensorF32Flex(st, prefix+"output.LayerNorm.bias"); err != nil {
+			return nil, err
+		}
+	}
+
+	return m, nil
+}
+
+// SaveBF16Model saves a BFloat16 model to disk in Safetensors format.
+func SaveBF16Model(m *Model, targetPath string) error {
+	tensors := make(map[string]safetensors.TensorData)
+	vocabSize := m.VocabSize()
+
+	tensors["embeddings.word_embeddings.weight"] = safetensors.NewTensorBF16([]int{vocabSize, HiddenSize}, m.BF16WordEmbeddings)
+	tensors["embeddings.position_embeddings.weight"] = safetensors.NewTensorF32([]int{len(m.PositionEmbeddings) / HiddenSize, HiddenSize}, m.PositionEmbeddings)
+	if len(m.TokenTypeEmbeddings) > 0 {
+		tensors["embeddings.token_type_embeddings.weight"] = safetensors.NewTensorF32([]int{len(m.TokenTypeEmbeddings) / HiddenSize, HiddenSize}, m.TokenTypeEmbeddings)
+	}
+	tensors["embeddings.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, m.EmbeddingsNormW)
+	tensors["embeddings.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, m.EmbeddingsNormB)
+
+	for i := 0; i < NumLayers; i++ {
+		prefix := fmt.Sprintf("encoder.layer.%d.", i)
+		l := &m.BF16Layers[i]
+
+		tensors[prefix+"attention.self.query.weight"] = safetensors.NewTensorBF16([]int{HiddenSize, HiddenSize}, l.Query.Weight)
+		tensors[prefix+"attention.self.query.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Query.Bias)
+
+		tensors[prefix+"attention.self.key.weight"] = safetensors.NewTensorBF16([]int{HiddenSize, HiddenSize}, l.Key.Weight)
+		tensors[prefix+"attention.self.key.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Key.Bias)
+
+		tensors[prefix+"attention.self.value.weight"] = safetensors.NewTensorBF16([]int{HiddenSize, HiddenSize}, l.Value.Weight)
+		tensors[prefix+"attention.self.value.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Value.Bias)
+
+		tensors[prefix+"attention.output.dense.weight"] = safetensors.NewTensorBF16([]int{HiddenSize, HiddenSize}, l.Out.Weight)
+		tensors[prefix+"attention.output.dense.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Out.Bias)
+
+		tensors[prefix+"attention.output.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, l.AttnNormW)
+		tensors[prefix+"attention.output.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.AttnNormB)
+
+		tensors[prefix+"intermediate.dense.weight"] = safetensors.NewTensorBF16([]int{IntermediateSize, HiddenSize}, l.FFN1.Weight)
+		tensors[prefix+"intermediate.dense.bias"] = safetensors.NewTensorF32([]int{IntermediateSize}, l.FFN1.Bias)
+
+		tensors[prefix+"output.dense.weight"] = safetensors.NewTensorBF16([]int{HiddenSize, IntermediateSize}, l.FFN2.Weight)
+		tensors[prefix+"output.dense.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFN2.Bias)
+
+		tensors[prefix+"output.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFNNormW)
+		tensors[prefix+"output.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFNNormB)
+	}
+
+	return safetensors.WriteFile(targetPath, tensors)
+}
+
+// SaveQuantizedModel saves an INT8 quantized model to disk in Safetensors format.
+func SaveQuantizedModel(m *Model, targetPath string) error {
+	tensors := make(map[string]safetensors.TensorData)
+	vocabSize := m.VocabSize()
+
+	tensors["embeddings.word_embeddings.weight"] = safetensors.NewTensorI8([]int{vocabSize, HiddenSize}, m.QWordEmbeddings.Weight)
+	tensors["embeddings.word_embeddings.scale"] = safetensors.NewTensorF32([]int{vocabSize}, m.QWordEmbeddings.Scale)
+	tensors["embeddings.position_embeddings.weight"] = safetensors.NewTensorF32([]int{len(m.PositionEmbeddings) / HiddenSize, HiddenSize}, m.PositionEmbeddings)
+	if len(m.TokenTypeEmbeddings) > 0 {
+		tensors["embeddings.token_type_embeddings.weight"] = safetensors.NewTensorF32([]int{len(m.TokenTypeEmbeddings) / HiddenSize, HiddenSize}, m.TokenTypeEmbeddings)
+	}
+	tensors["embeddings.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, m.EmbeddingsNormW)
+	tensors["embeddings.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, m.EmbeddingsNormB)
+
+	for i := 0; i < NumLayers; i++ {
+		prefix := fmt.Sprintf("encoder.layer.%d.", i)
+		l := &m.QLayers[i]
+
+		tensors[prefix+"attention.self.query.weight"] = safetensors.NewTensorI8([]int{HiddenSize, HiddenSize}, l.Query.Weight)
+		tensors[prefix+"attention.self.query.scale"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Query.Scale)
+		tensors[prefix+"attention.self.query.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Query.Bias)
+
+		tensors[prefix+"attention.self.key.weight"] = safetensors.NewTensorI8([]int{HiddenSize, HiddenSize}, l.Key.Weight)
+		tensors[prefix+"attention.self.key.scale"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Key.Scale)
+		tensors[prefix+"attention.self.key.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Key.Bias)
+
+		tensors[prefix+"attention.self.value.weight"] = safetensors.NewTensorI8([]int{HiddenSize, HiddenSize}, l.Value.Weight)
+		tensors[prefix+"attention.self.value.scale"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Value.Scale)
+		tensors[prefix+"attention.self.value.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Value.Bias)
+
+		tensors[prefix+"attention.output.dense.weight"] = safetensors.NewTensorI8([]int{HiddenSize, HiddenSize}, l.Out.Weight)
+		tensors[prefix+"attention.output.dense.scale"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Out.Scale)
+		tensors[prefix+"attention.output.dense.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.Out.Bias)
+
+		tensors[prefix+"attention.output.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, l.AttnNormW)
+		tensors[prefix+"attention.output.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.AttnNormB)
+
+		tensors[prefix+"intermediate.dense.weight"] = safetensors.NewTensorI8([]int{IntermediateSize, HiddenSize}, l.FFN1.Weight)
+		tensors[prefix+"intermediate.dense.scale"] = safetensors.NewTensorF32([]int{IntermediateSize}, l.FFN1.Scale)
+		tensors[prefix+"intermediate.dense.bias"] = safetensors.NewTensorF32([]int{IntermediateSize}, l.FFN1.Bias)
+
+		tensors[prefix+"output.dense.weight"] = safetensors.NewTensorI8([]int{HiddenSize, IntermediateSize}, l.FFN2.Weight)
+		tensors[prefix+"output.dense.scale"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFN2.Scale)
+		tensors[prefix+"output.dense.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFN2.Bias)
+
+		tensors[prefix+"output.LayerNorm.weight"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFNNormW)
+		tensors[prefix+"output.LayerNorm.bias"] = safetensors.NewTensorF32([]int{HiddenSize}, l.FFNNormB)
+	}
+
+	return safetensors.WriteFile(targetPath, tensors)
+}
+
+// LoadModelWithPrecision loads model weights with memory mapping and caching of quantized weights on disk.
+func LoadModelWithPrecision(modelPath, tokenizerPath string, prec PrecisionMode) (*Model, error) {
 	switch prec {
 	case PrecisionBF16:
-		return ConvertToBF16Model(m), nil
+		if strings.HasSuffix(modelPath, "_bf16.safetensors") {
+			return LoadBF16Model(modelPath, tokenizerPath)
+		}
+		derivedPath := strings.TrimSuffix(modelPath, ".safetensors") + "_bf16.safetensors"
+		if fi, err := os.Stat(derivedPath); err == nil && fi.Size() > 0 {
+			return LoadBF16Model(derivedPath, tokenizerPath)
+		}
+
+		// Load FP32, convert, save to disk, and mmap
+		fp32M, err := loadFP32Model(modelPath, tokenizerPath)
+		if err != nil {
+			return nil, err
+		}
+		bf16M := ConvertToBF16Model(fp32M)
+		saveErr := SaveBF16Model(bf16M, derivedPath)
+		fp32M.Close()
+
+		if saveErr == nil {
+			return LoadBF16Model(derivedPath, tokenizerPath)
+		}
+		return bf16M, nil
+
 	case PrecisionINT8:
-		return QuantizeModel(m), nil
+		if strings.HasSuffix(modelPath, "_int8.safetensors") {
+			return LoadQuantizedModel(modelPath, tokenizerPath)
+		}
+		derivedPath := strings.TrimSuffix(modelPath, ".safetensors") + "_int8.safetensors"
+		if fi, err := os.Stat(derivedPath); err == nil && fi.Size() > 0 {
+			return LoadQuantizedModel(derivedPath, tokenizerPath)
+		}
+
+		// Load FP32, quantize, save to disk, and mmap
+		fp32M, err := loadFP32Model(modelPath, tokenizerPath)
+		if err != nil {
+			return nil, err
+		}
+		qM := QuantizeModel(fp32M)
+		saveErr := SaveQuantizedModel(qM, derivedPath)
+		fp32M.Close()
+
+		if saveErr == nil {
+			return LoadQuantizedModel(derivedPath, tokenizerPath)
+		}
+		return qM, nil
+
 	default:
-		m.Precision = PrecisionFP32
-		return m, nil
+		return loadFP32Model(modelPath, tokenizerPath)
 	}
 }

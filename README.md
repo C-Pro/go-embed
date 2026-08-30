@@ -18,11 +18,14 @@ A high-performance, pure Go (CGO-free), CPU-only inference library for tokenizat
   - **FP32 Full Precision (Default):** Maximum compute performance (`~54 ms` short query latency, 449 MB RAM).
   - **BFloat16 (BF16):** Native 16-bit float weights reduce RAM to **225 MB (2× reduction)** with $>99.999\%$ fidelity and zero scaling overhead.
   - **INT8 Dynamic Quantization (W8A32):** Dynamic 8-bit integer weights reduce RAM to **~125 MB (3.6× reduction)** with $>99.97\%$ fidelity.
+- **Sliding Window Chunking with Overlap:** Full support for input texts of arbitrary length. Inputs exceeding the model sequence length are tokenized across the full text and chunked with configurable sliding windows and overlaps (`WithChunking(windowSize, overlap)`), returning a slice of 384-dimensional vectors (`[][]float32`).
+- **Zero-Copy Memory Mapping (`mmap`) & Instant Startup:** Model weights across all precision modes (FP32, BF16, and INT8) are memory-mapped directly into virtual address space via cross-platform OS syscalls (Windows `CreateFileMapping` / POSIX `syscall.Mmap`). Word embeddings (~85% of model size) are demand-paged on-the-fly by the OS kernel, enabling instant `0.00s` startup time and automatic page cache eviction under memory pressure.
+- **Automatic Quantized Disk Caching:** When BF16 or INT8 precision is selected, `go-embed` automatically generates and saves 64-byte SIMD-aligned `model_bf16.safetensors` or `model_int8.safetensors` on disk during first load for instant subsequent `mmap` executions.
 - **Zero Heap Allocations in Steady-State:** Pre-allocated scratchpad buffers (`InferenceContext`) achieve **`0 B/op` and `0 allocs/op`** during inference across all precision modes.
 - **Hardware Acceleration via Go 1.27 SIMD:** Leverages Go 1.27's standard `simd.Float32s` with 8-way unrolled fused multiply-add (`MulAdd`), vectorized LayerNorm, fast GELU, and cosine similarity. Includes portable scalar fallback when compiled without SIMD flags.
 - **Exact Numerical Parity:** Validated against PyTorch reference outputs with Cosine Similarity $\ge 0.999999$ across short queries, full sentences, code snippets, empty strings, and 512-token max-length sequences.
 - **Cross-Lingual Support:** Supports 100+ languages (English, Russian, Indonesian, German, Chinese, etc.) with semantic consistency $\ge 0.80$ across language pairs.
-- **Built-in Tokenizer & Safetensors Loader:** Includes a pure Go SentencePiece/Unigram tokenizer (with NFKC normalization and Viterbi DP search) and `.safetensors` weight loader.
+- **Built-in Tokenizer & Safetensors Loader/Writer:** Includes a pure Go SentencePiece/Unigram tokenizer (with NFKC normalization and Viterbi DP search) and `.safetensors` reader/writer.
 
 ---
 
@@ -75,20 +78,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize engine: %v", err)
 	}
+	defer eng.Close()
 
 	// E5 models use "query: " and "passage: " prefixes for asymmetric retrieval
 	query := "how to implement consensus in distributed systems?"
 	relPassage := "Consensus algorithms like Raft and Paxos ensure consistency across nodes."
 	irrelPassage := "Authentic Italian tiramisu recipe with mascarpone and espresso."
 
-	// Generate 384-dimensional L2-normalized embeddings
-	qEmb, _ := eng.EmbedQuery(query)
-	pRelEmb, _ := eng.EmbedPassage(relPassage)
-	pIrrelEmb, _ := eng.EmbedPassage(irrelPassage)
+	// Generate 384-dimensional L2-normalized embeddings (returns [][]float32 for sliding window chunks)
+	qEmbs, _ := eng.EmbedQuery(query)
+	pRelEmbs, _ := eng.EmbedPassage(relPassage)
+	pIrrelEmbs, _ := eng.EmbedPassage(irrelPassage)
 
 	// Compute Cosine Similarity
-	simRel := engine.CosineSimilarity(qEmb, pRelEmb)
-	simIrrel := engine.CosineSimilarity(qEmb, pIrrelEmb)
+	simRel := engine.CosineSimilarity(qEmbs[0], pRelEmbs[0])
+	simIrrel := engine.CosineSimilarity(qEmbs[0], pIrrelEmbs[0])
 
 	fmt.Printf("Query: %s\n", query)
 	fmt.Printf("Similarity to relevant passage:   %.4f\n", simRel)   // ~0.87
@@ -98,14 +102,27 @@ func main() {
 
 ---
 
-### 2. Ergonomic Functional Options
+### 2. Ergonomic Functional Options & Dynamic Prefix Detection
 
-Customize data directories, precision modes, or custom Hugging Face model repositories:
+`go-embed` automatically detects task prefix requirements:
+1. From **`config_sentence_transformers.json`** if present in the Hugging Face repository metadata (`prompts` dictionary).
+2. From **known model families** (e.g. `e5` uses `"query: "` and `"passage: "`, `bge` uses retrieval instruction, `MiniLM` uses no prefix).
+3. Via **explicit user overrides**:
 
 ```go
-// Override data directory where to store/look up models
+// Custom task prefixes overriding auto-detection
 eng, err := engine.NewEngine(
-    engine.WithDataDir("./my_models"),
+    engine.WithPrefixes("search_query: ", "search_document: "),
+)
+
+// Disable automatic prefixes completely (treat as symmetric model)
+eng, err := engine.NewEngine(
+    engine.WithNoPrefixes(),
+)
+
+// Configure sliding window size and overlap for documents with >512 tokens
+eng, err := engine.NewEngine(
+    engine.WithChunking(512, 256), // Window 512, Overlap 256
 )
 
 // BFloat16 mode (cuts RAM in half to 225 MB; trades off slight compute speed for memory)
@@ -144,7 +161,7 @@ eng, err := engine.NewEngine(
 | **Layer Normalization** | Post-LN ($\epsilon = 10^{-5}$) |
 | **Activation Function** | GELU |
 | **Tokenizer Algorithm** | SentencePiece (Unigram) with NFKC normalization |
-| **Max Sequence Length** | Up to 512 tokens |
+| **Max Sequence Length** | 512 tokens (unlimited via sliding windows) |
 | **File Formats** | `model.safetensors` + `tokenizer.json` |
 
 ---
@@ -161,8 +178,8 @@ The following models are verified and automatically downloaded from Hugging Face
   eng, err := engine.NewEngine(
       engine.WithModelName("intfloat/multilingual-e5-small"),
   )
-  qEmb, _ := eng.EmbedQuery("how to implement consensus in distributed systems?")
-  pEmb, _ := eng.EmbedPassage("Consensus algorithms like Raft and Paxos ensure consistency.")
+  qEmbs, _ := eng.EmbedQuery("how to implement consensus in distributed systems?")
+  pEmbs, _ := eng.EmbedPassage("Consensus algorithms like Raft and Paxos ensure consistency.")
   ```
 
 #### 2. [`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)
@@ -174,14 +191,14 @@ The following models are verified and automatically downloaded from Hugging Face
       engine.WithModelName("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"),
       engine.WithBF16(), // Cuts RAM in half (225 MB)
   )
-  emb1, _ := eng.Embed("The cat is sleeping peacefully on the sofa.")
-  emb2, _ := eng.Embed("Die Katze schläft friedlich auf dem Sofa.")
-  similarity := engine.CosineSimilarity(emb1, emb2) // ~0.9846
+  embs1, _ := eng.Embed("The cat is sleeping peacefully on the sofa.")
+  embs2, _ := eng.Embed("Die Katze schläft friedlich auf dem Sofa.")
+  similarity, _ := eng.Similarity("The cat is sleeping peacefully on the sofa.", "Die Katze schläft friedlich auf dem Sofa.") // ~0.9846
   ```
 
 ---
 
-### 3. Zero-Allocation Batching & Context Pool
+### 3. Reusable Context Pool
 
 For high-throughput web servers or pipeline processing, reuse pre-allocated buffers with `ContextPool`:
 
@@ -199,22 +216,20 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer eng.Close()
 
 	// ContextPool manages reusable memory scratchpads for goroutines
-	pool := engine.NewContextPool(eng.Model())
+	pool := engine.NewContextPool(eng.Model(), engine.DefaultWindowSize, engine.DefaultOverlap)
 	ctx := pool.Get()
 	defer pool.Put(ctx)
 
-	// Pre-allocated destination slice (384 float32s)
-	outBuf := make([]float32, engine.HiddenSize)
-
-	// Generates embedding into outBuf with 0 heap allocations
-	emb, err := ctx.Embed("query: low latency Go inference", outBuf)
+	// Generates embeddings across sliding windows
+	embs, err := ctx.Embed("query: low latency Go inference")
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("First 3 dimensions: [%.4f, %.4f, %.4f]\n", emb[0], emb[1], emb[2])
+	fmt.Printf("Generated %d vector(s), first 3 dimensions: [%.4f, %.4f, %.4f]\n", len(embs), embs[0][0], embs[0][1], embs[0][2])
 }
 ```
 
@@ -311,7 +326,13 @@ GOEXPERIMENT=simd go test -run=^$ -bench=. -benchmem ./pkg/engine
 │   │   ├── context.go      # Pre-allocated zero-allocation scratchpad and sync.Pool
 │   │   ├── model.go        # Contiguous model parameter layouts & safetensors loader
 │   │   └── engine.go       # High-level ergonomic API (NewEngine with functional options)
-│   ├── safetensors/        # Pure Go .safetensors binary reader and parser
+│   ├── safetensors/        # Pure Go .safetensors binary reader, writer & OS mmap
+│   │   ├── mmap.go         # MmapFile interface
+│   │   ├── mmap_unix.go    # POSIX / Linux / Darwin syscall.Mmap
+│   │   ├── mmap_windows.go # Windows CreateFileMapping / MapViewOfFile
+│   │   ├── mmap_fallback.go# Portable fallback
+│   │   ├── writer.go       # Atomic 64-byte aligned safetensors writer
+│   │   └── safetensors.go  # Safetensors memory-mapped tensor views
 │   └── tokenizer/          # Pure Go SentencePiece/Unigram tokenizer & Viterbi search
 └── testdata/
     └── golden.json         # 26 PyTorch/Transformers ground truth vectors

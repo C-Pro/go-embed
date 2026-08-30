@@ -169,16 +169,11 @@ type DPState struct {
 	TokenID int
 }
 
-// EncodeIntoZeroAlloc encodes text into inputIDs and attnMask using provided runeBuf and dpBuf without heap allocations.
-func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []int, attnMask []int8, dpBuf []DPState, maxLen int) ([]rune, []int, []int8) {
-	if maxLen <= 0 {
-		maxLen = MaxSeqLen
-	}
-
+// EncodeRawIntoZeroAlloc tokenizes text into raw content tokens (without BOS/EOS) using provided runeBuf and dpBuf without heap allocations.
+func (t *Tokenizer) EncodeRawIntoZeroAlloc(text string, runeBuf []rune, tokens []int, dpBuf []DPState) ([]rune, []int) {
 	runeBuf = runeBuf[:0]
 
 	// 1. In-place rune decoding and normalization into runeBuf
-	// Prepend Metaspace if text is not empty and doesn't start with space
 	hasNonSpace := false
 	for _, r := range text {
 		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
@@ -188,9 +183,7 @@ func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []
 	}
 
 	if !hasNonSpace {
-		inputIDs = append(inputIDs[:0], BOS_ID, EOS_ID)
-		attnMask = append(attnMask[:0], 1, 1)
-		return runeBuf, inputIDs, attnMask
+		return runeBuf, tokens[:0]
 	}
 
 	runeBuf = append(runeBuf, Metaspace)
@@ -289,24 +282,45 @@ func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []
 		}
 	}
 
-	// Backtrack into inputIDs
-	inputIDs = inputIDs[:0]
+	// Backtrack into tokens
+	tokens = tokens[:0]
 	currIdx := n
 	for currIdx > 0 {
 		prev := dpBuf[currIdx]
 		if prev.PrevIdx < 0 {
 			break
 		}
-		inputIDs = append(inputIDs, prev.TokenID)
+		tokens = append(tokens, prev.TokenID)
 		currIdx = prev.PrevIdx
 	}
 
 	// Reverse tokens
-	for i, j := 0, len(inputIDs)-1; i < j; i, j = i+1, j-1 {
-		inputIDs[i], inputIDs[j] = inputIDs[j], inputIDs[i]
+	for i, j := 0, len(tokens)-1; i < j; i, j = i+1, j-1 {
+		tokens[i], tokens[j] = tokens[j], tokens[i]
 	}
 
-	numTokens := len(inputIDs)
+	return runeBuf, tokens
+}
+
+// EncodeRaw tokenizes text into raw content tokens (without BOS/EOS).
+func (t *Tokenizer) EncodeRaw(text string) []int {
+	runeBuf := make([]rune, 0, len(text)+2)
+	tokens := make([]int, 0, 1024)
+	dpBuf := make([]DPState, 0, 1024)
+	_, tokens = t.EncodeRawIntoZeroAlloc(text, runeBuf, tokens, dpBuf)
+	return tokens
+}
+
+// EncodeIntoZeroAlloc encodes text into inputIDs and attnMask with BOS/EOS wrapping and optional truncation.
+func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []int, attnMask []int8, dpBuf []DPState, maxLen int) ([]rune, []int, []int8) {
+	if maxLen <= 0 {
+		maxLen = MaxSeqLen
+	}
+
+	var rawTokens []int
+	runeBuf, rawTokens = t.EncodeRawIntoZeroAlloc(text, runeBuf, inputIDs, dpBuf)
+
+	numTokens := len(rawTokens)
 	finalLen := numTokens + 2
 	if finalLen > maxLen {
 		finalLen = maxLen
@@ -315,12 +329,14 @@ func (t *Tokenizer) EncodeIntoZeroAlloc(text string, runeBuf []rune, inputIDs []
 	if cap(inputIDs) < finalLen {
 		newIDs := make([]int, finalLen)
 		newIDs[0] = BOS_ID
-		copy(newIDs[1:], inputIDs[:finalLen-2])
+		copy(newIDs[1:], rawTokens[:finalLen-2])
 		newIDs[finalLen-1] = EOS_ID
 		inputIDs = newIDs
 	} else {
 		inputIDs = inputIDs[:finalLen]
-		copy(inputIDs[1:], inputIDs[:finalLen-2])
+		if finalLen > 2 {
+			copy(inputIDs[1:finalLen-1], rawTokens[:finalLen-2])
+		}
 		inputIDs[0] = BOS_ID
 		inputIDs[finalLen-1] = EOS_ID
 	}

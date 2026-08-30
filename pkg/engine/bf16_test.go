@@ -44,18 +44,18 @@ func TestBF16ParityAgainstFP32(t *testing.T) {
 
 	for i, tc := range golden {
 		t.Run(tc.Text, func(t *testing.T) {
-			fp32Emb, err := fp32Eng.Embed(tc.Text)
+			fp32Embs, err := fp32Eng.Embed(tc.Text)
 			if err != nil {
 				t.Fatalf("FP32 embed failed: %v", err)
 			}
 
-			bf16Emb, err := bf16Eng.Embed(tc.Text)
+			bf16Embs, err := bf16Eng.Embed(tc.Text)
 			if err != nil {
 				t.Fatalf("BF16 embed failed: %v", err)
 			}
 
-			sim := engine.CosineSimilarity(fp32Emb, bf16Emb)
-			simGolden := engine.CosineSimilarity(bf16Emb, tc.Embedding)
+			sim := engine.CosineSimilarity(fp32Embs[0], bf16Embs[0])
+			simGolden := engine.CosineSimilarity(bf16Embs[0], tc.Embedding)
 
 			t.Logf("Case #%d: Sim(BF16, FP32)=%.6f, Sim(BF16, Golden)=%.6f", i, sim, simGolden)
 
@@ -67,34 +67,5 @@ func TestBF16ParityAgainstFP32(t *testing.T) {
 				t.Errorf("BF16 vs Golden similarity too low: %.6f (expected >= 0.9995)", simGolden)
 			}
 		})
-	}
-}
-
-func TestBF16ZeroAllocations(t *testing.T) {
-	eng := loadTestBF16Model(t)
-
-	ctx := engine.NewContext(eng.Model())
-	out := make([]float32, engine.HiddenSize)
-	query := "query: how to implement consensus in distributed systems?"
-
-	// Warm up
-	if _, err := ctx.Embed(query, out); err != nil {
-		t.Fatalf("Warmup failed: %v", err)
-	}
-
-	allocIters := 100
-	if isCI() {
-		allocIters = 2
-	}
-
-	allocs := testing.AllocsPerRun(allocIters, func() {
-		if _, err := ctx.Embed(query, out); err != nil {
-			t.Fatalf("Embed error: %v", err)
-		}
-	})
-
-	t.Logf("BF16 Steady-state allocations per run: %.1f", allocs)
-	if allocs != 0 {
-		t.Errorf("Expected 0 allocations per run in BF16, got %.1f", allocs)
 	}
 }

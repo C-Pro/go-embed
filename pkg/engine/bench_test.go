@@ -33,31 +33,29 @@ func BenchmarkComparative(b *testing.B) {
 		toks, _ := eng.Model().Tok.Encode(txt, l)
 		actualLen := len(toks)
 
-		// 1. Pure Go Scalar Engine (Zero-Allocation Context)
+		// 1. Pure Go Scalar Engine
 		b.Run(fmt.Sprintf("ScalarEngine/L=%d", actualLen), func(b *testing.B) {
 			ctx := engine.NewContext(eng.Model())
 			ctx.UseSIMD = false
-			out := make([]float32, engine.HiddenSize)
 			b.ResetTimer()
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := ctx.EmbedTokenIDs(toks, nil, out); err != nil {
+				if _, err := ctx.EmbedTokenIDs(toks, nil); err != nil {
 					b.Fatalf("Scalar encode failed: %v", err)
 				}
 			}
 		})
 
-		// 3. Pure Go SIMD Engine (Zero-Allocation Context)
+		// 3. Pure Go SIMD Engine
 		b.Run(fmt.Sprintf("SIMDEngine/L=%d", actualLen), func(b *testing.B) {
 			ctx := engine.NewContext(eng.Model())
 			ctx.UseSIMD = true
-			out := make([]float32, engine.HiddenSize)
 			b.ResetTimer()
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := ctx.EmbedTokenIDs(toks, nil, out); err != nil {
+				if _, err := ctx.EmbedTokenIDs(toks, nil); err != nil {
 					b.Fatalf("SIMD encode failed: %v", err)
 				}
 			}
@@ -71,12 +69,11 @@ func BenchmarkComparative(b *testing.B) {
 			}
 			ctx := engine.NewContext(qEng.Model())
 			ctx.UseSIMD = false
-			out := make([]float32, engine.HiddenSize)
 			b.ResetTimer()
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := ctx.EmbedTokenIDs(toks, nil, out); err != nil {
+				if _, err := ctx.EmbedTokenIDs(toks, nil); err != nil {
 					b.Fatalf("INT8 Scalar encode failed: %v", err)
 				}
 			}
@@ -90,12 +87,11 @@ func BenchmarkComparative(b *testing.B) {
 			}
 			ctx := engine.NewContext(qEng.Model())
 			ctx.UseSIMD = true
-			out := make([]float32, engine.HiddenSize)
 			b.ResetTimer()
 			b.ReportAllocs()
 
 			for i := 0; i < b.N; i++ {
-				if _, err := ctx.EmbedTokenIDs(toks, nil, out); err != nil {
+				if _, err := ctx.EmbedTokenIDs(toks, nil); err != nil {
 					b.Fatalf("INT8 SIMD encode failed: %v", err)
 				}
 			}
@@ -147,14 +143,13 @@ func BenchmarkShortQuery(b *testing.B) {
 
 	query := "query: how to implement consensus in distributed systems?"
 	ctx := engine.NewContext(eng.Model())
-	out := make([]float32, engine.HiddenSize)
 
 	b.Run("Scalar/EndToEnd", func(b *testing.B) {
 		ctx.UseSIMD = false
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := ctx.Embed(query, out); err != nil {
+			if _, err := ctx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -165,7 +160,7 @@ func BenchmarkShortQuery(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := ctx.Embed(query, out); err != nil {
+			if _, err := ctx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -183,7 +178,7 @@ func BenchmarkShortQuery(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := bf16Ctx.Embed(query, out); err != nil {
+			if _, err := bf16Ctx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -194,7 +189,7 @@ func BenchmarkShortQuery(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := bf16Ctx.Embed(query, out); err != nil {
+			if _, err := bf16Ctx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -212,7 +207,7 @@ func BenchmarkShortQuery(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := qCtx.Embed(query, out); err != nil {
+			if _, err := qCtx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -223,7 +218,7 @@ func BenchmarkShortQuery(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := qCtx.Embed(query, out); err != nil {
+			if _, err := qCtx.Embed(query); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -245,14 +240,13 @@ func BenchmarkModelComparison(b *testing.B) {
 
 	e5Ctx := engine.NewContext(e5Eng.Model())
 	minilmCtx := engine.NewContext(minilmEng.Model())
-	out := make([]float32, engine.HiddenSize)
 	text := "How do you implement consensus in a distributed system?"
 
 	b.Run("Multilingual-E5-Small/FP32-SIMD", func(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := e5Ctx.Embed(text, out); err != nil {
+			if _, err := e5Ctx.Embed(text); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}
@@ -262,7 +256,7 @@ func BenchmarkModelComparison(b *testing.B) {
 		b.ResetTimer()
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			if _, err := minilmCtx.Embed(text, out); err != nil {
+			if _, err := minilmCtx.Embed(text); err != nil {
 				b.Fatalf("Embed failed: %v", err)
 			}
 		}

@@ -7,20 +7,27 @@ import (
 
 // Engine is the thread-safe, production-ready inference engine for text embedding generation.
 type Engine struct {
-	model *Model
-	pool  *ContextPool
+	model         *Model
+	pool          *ContextPool
+	queryPrefix   string
+	passagePrefix string
 }
 
-// Option configures engine loading, precision, and model storage parameters.
+// Option configures engine loading, precision, model storage parameters, and prefix formatting.
 type Option func(*engineConfig)
 
 type engineConfig struct {
-	modelName     string
-	dataDir       string
-	modelPath     string
-	tokenizerPath string
-	precision     PrecisionMode
-	silent        bool
+	modelName           string
+	dataDir             string
+	modelPath           string
+	tokenizerPath       string
+	precision           PrecisionMode
+	windowSize          int
+	overlap             int
+	queryPrefix         string
+	passagePrefix       string
+	hasExplicitPrefixes bool
+	silent              bool
 }
 
 // WithDataDir overrides the directory where model files are stored and looked up.
@@ -80,6 +87,55 @@ func WithQuantization(enabled bool) Option {
 	}
 }
 
+// WithChunking configures the sliding window size and overlap token count for inputs exceeding max tokens.
+func WithChunking(windowSize, overlap int) Option {
+	return func(c *engineConfig) {
+		c.windowSize = windowSize
+		c.overlap = overlap
+	}
+}
+
+// WithOverlap configures the number of overlapping tokens between successive sliding windows.
+func WithOverlap(overlap int) Option {
+	return func(c *engineConfig) {
+		c.overlap = overlap
+	}
+}
+
+// WithPrefixes sets custom query and passage prefixes, overriding automatic detection.
+func WithPrefixes(queryPrefix, passagePrefix string) Option {
+	return func(c *engineConfig) {
+		c.queryPrefix = queryPrefix
+		c.passagePrefix = passagePrefix
+		c.hasExplicitPrefixes = true
+	}
+}
+
+// WithQueryPrefix sets an explicit query prefix.
+func WithQueryPrefix(prefix string) Option {
+	return func(c *engineConfig) {
+		c.queryPrefix = prefix
+		c.hasExplicitPrefixes = true
+	}
+}
+
+// WithPassagePrefix sets an explicit passage prefix.
+func WithPassagePrefix(prefix string) Option {
+	return func(c *engineConfig) {
+		c.passagePrefix = prefix
+		c.hasExplicitPrefixes = true
+	}
+}
+
+// WithNoPrefixes disables query and passage prefix prepending completely.
+func WithNoPrefixes() Option {
+	return func(c *engineConfig) {
+		c.queryPrefix = ""
+		c.passagePrefix = ""
+		c.hasExplicitPrefixes = true
+	}
+}
+
 // WithSilentDownload silences stdout progress reporting during automatic Hugging Face file downloads.
 func WithSilentDownload(silent bool) Option {
 	return func(c *engineConfig) {
@@ -98,9 +154,11 @@ func WithSilentDownload(silent bool) Option {
 //	eng, err := engine.NewEngine(engine.WithModelName("intfloat/multilingual-e5-small"), engine.WithINT8())
 func NewEngine(opts ...Option) (*Engine, error) {
 	cfg := engineConfig{
-		modelName: DefaultModelName,
-		precision: PrecisionFP32,
-		silent:    false,
+		modelName:  DefaultModelName,
+		precision:  PrecisionFP32,
+		windowSize: DefaultWindowSize,
+		overlap:    DefaultOverlap,
+		silent:     false,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -117,14 +175,22 @@ func NewEngine(opts ...Option) (*Engine, error) {
 		}
 	}
 
+	queryPrefix := cfg.queryPrefix
+	passagePrefix := cfg.passagePrefix
+	if !cfg.hasExplicitPrefixes {
+		queryPrefix, passagePrefix = DetectModelPrefixes(cfg.dataDir, cfg.modelName, cfg.silent)
+	}
+
 	m, err := LoadModelWithPrecision(modelPath, tokenizerPath, cfg.precision)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load model: %w", err)
 	}
 
 	return &Engine{
-		model: m,
-		pool:  NewContextPool(m),
+		model:         m,
+		pool:          NewContextPool(m, cfg.windowSize, cfg.overlap, queryPrefix, passagePrefix),
+		queryPrefix:   queryPrefix,
+		passagePrefix: passagePrefix,
 	}, nil
 }
 
@@ -147,7 +213,7 @@ func NewQuantized(modelPath, tokenizerPath string) (*Engine, error) {
 func NewWithModel(m *Model) *Engine {
 	return &Engine{
 		model: m,
-		pool:  NewContextPool(m),
+		pool:  NewContextPool(m, DefaultWindowSize, DefaultOverlap, "", ""),
 	}
 }
 
@@ -172,36 +238,52 @@ func (e *Engine) Model() *Model {
 	return e.model
 }
 
-// Embed generates an L2-normalized 384-dimensional embedding for the input text.
-func (e *Engine) Embed(text string) ([]float32, error) {
-	ctx := e.pool.Get()
-	defer e.pool.Put(ctx)
-
-	out := make([]float32, HiddenSize)
-	return ctx.Embed(text, out)
+// QueryPrefix returns the configured prefix prepended to queries by EmbedQuery.
+func (e *Engine) QueryPrefix() string {
+	return e.queryPrefix
 }
 
-// EmbedQuery generates an embedding for a query with standard 'query: ' prefix.
-func (e *Engine) EmbedQuery(text string) ([]float32, error) {
-	ctx := e.pool.Get()
-	defer e.pool.Put(ctx)
-
-	out := make([]float32, HiddenSize)
-	return ctx.EmbedQuery(text, out)
+// PassagePrefix returns the configured prefix prepended to passages by EmbedPassage.
+func (e *Engine) PassagePrefix() string {
+	return e.passagePrefix
 }
 
-// EmbedPassage generates an embedding for a passage with standard 'passage: ' prefix.
-func (e *Engine) EmbedPassage(text string) ([]float32, error) {
+// Close releases any memory-mapped file resources held by the engine's model.
+func (e *Engine) Close() error {
+	if e.model != nil {
+		return e.model.Close()
+	}
+	return nil
+}
+
+// Embed generates L2-normalized 384-dimensional embeddings for the input text across sliding windows.
+// If the input text exceeds max tokens, it returns a slice of vectors, one for each window chunk.
+func (e *Engine) Embed(text string) ([][]float32, error) {
 	ctx := e.pool.Get()
 	defer e.pool.Put(ctx)
 
-	out := make([]float32, HiddenSize)
-	return ctx.EmbedPassage(text, out)
+	return ctx.Embed(text)
+}
+
+// EmbedQuery generates embeddings for a query with standard 'query: ' prefix.
+func (e *Engine) EmbedQuery(text string) ([][]float32, error) {
+	ctx := e.pool.Get()
+	defer e.pool.Put(ctx)
+
+	return ctx.EmbedQuery(text)
+}
+
+// EmbedPassage generates embeddings for a passage with standard 'passage: ' prefix.
+func (e *Engine) EmbedPassage(text string) ([][]float32, error) {
+	ctx := e.pool.Get()
+	defer e.pool.Put(ctx)
+
+	return ctx.EmbedPassage(text)
 }
 
 // EmbedBatch generates embeddings concurrently across multiple texts.
-func (e *Engine) EmbedBatch(texts []string) ([][]float32, error) {
-	results := make([][]float32, len(texts))
+func (e *Engine) EmbedBatch(texts []string) ([][][]float32, error) {
+	results := make([][][]float32, len(texts))
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(texts))
 
@@ -212,12 +294,12 @@ func (e *Engine) EmbedBatch(texts []string) ([][]float32, error) {
 			ctx := e.pool.Get()
 			defer e.pool.Put(ctx)
 
-			out := make([]float32, HiddenSize)
-			if _, err := ctx.Embed(txt, out); err != nil {
+			embs, err := ctx.Embed(txt)
+			if err != nil {
 				errCh <- fmt.Errorf("batch item %d failed: %w", idx, err)
 				return
 			}
-			results[idx] = out
+			results[idx] = embs
 		}(i, text)
 	}
 
@@ -230,7 +312,7 @@ func (e *Engine) EmbedBatch(texts []string) ([][]float32, error) {
 	return results, nil
 }
 
-// Similarity calculates the cosine similarity between two text strings.
+// Similarity calculates the maximum cosine similarity across all chunk pairs between two text strings.
 func (e *Engine) Similarity(textA, textB string) (float32, error) {
 	embA, err := e.Embed(textA)
 	if err != nil {
@@ -240,5 +322,18 @@ func (e *Engine) Similarity(textA, textB string) (float32, error) {
 	if err != nil {
 		return 0, err
 	}
-	return CosineSimilarity(embA, embB), nil
+	if len(embA) == 0 || len(embB) == 0 {
+		return 0, nil
+	}
+
+	var maxSim float32 = -1.0
+	for _, va := range embA {
+		for _, vb := range embB {
+			sim := CosineSimilarity(va, vb)
+			if sim > maxSim {
+				maxSim = sim
+			}
+		}
+	}
+	return maxSim, nil
 }

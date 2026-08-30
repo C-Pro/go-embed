@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -13,6 +15,97 @@ const (
 	DefaultModelName = "intfloat/multilingual-e5-small"
 	HuggingFaceBase  = "https://huggingface.co"
 )
+
+type sentenceTransformersConfig struct {
+	Prompts           map[string]string `json:"prompts"`
+	DefaultPromptName string            `json:"default_prompt_name"`
+}
+
+// DetectModelPrefixes detects the query and passage prefixes for a model using:
+// 1. config_sentence_transformers.json (if present locally or on Hugging Face hub)
+// 2. Known model name patterns (e.g. e5, bge, nomic)
+// 3. Fallback to empty strings (symmetric models).
+func DetectModelPrefixes(dataDir, modelName string, silent bool) (queryPrefix, passagePrefix string) {
+	// 1. Try reading config_sentence_transformers.json locally or downloading it
+	if dataDir != "" {
+		cfgPath := filepath.Join(dataDir, "config_sentence_transformers.json")
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) && modelName != "" {
+			url := fmt.Sprintf("%s/%s/resolve/main/config_sentence_transformers.json", HuggingFaceBase, modelName)
+			_ = downloadOptionalFile(url, cfgPath)
+		}
+
+		if data, err := os.ReadFile(cfgPath); err == nil {
+			var stCfg sentenceTransformersConfig
+			if err := json.Unmarshal(data, &stCfg); err == nil && len(stCfg.Prompts) > 0 {
+				// Query prefix candidates
+				for _, key := range []string{"query", "retrieval.query", "search_query"} {
+					if p, ok := stCfg.Prompts[key]; ok && p != "" {
+						queryPrefix = p
+						break
+					}
+				}
+				// Passage prefix candidates
+				for _, key := range []string{"passage", "document", "retrieval.passage", "search_document"} {
+					if p, ok := stCfg.Prompts[key]; ok && p != "" {
+						passagePrefix = p
+						break
+					}
+				}
+
+				if queryPrefix != "" || passagePrefix != "" {
+					return queryPrefix, passagePrefix
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to known model name heuristics
+	lowerName := strings.ToLower(modelName)
+	if dataDir != "" && lowerName == "" {
+		lowerName = strings.ToLower(filepath.Base(dataDir))
+	}
+
+	switch {
+	case strings.Contains(lowerName, "e5"):
+		// e5 models (multilingual-e5-small, e5-base, e5-large, etc.) require "query: " and "passage: "
+		return "query: ", "passage: "
+	case strings.Contains(lowerName, "bge"):
+		// BGE models typically require query instruction for retrieval
+		return "Represent this sentence for searching relevant passages: ", ""
+	case strings.Contains(lowerName, "nomic-embed"):
+		return "search_query: ", "search_document: "
+	default:
+		// Default to empty for symmetric models (e.g. MiniLM, MPNet, etc.)
+		return "", ""
+	}
+}
+
+// downloadOptionalFile attempts to download an optional file from url without failing on 404.
+func downloadOptionalFile(url, destPath string) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "go-embed/1.0 (pure Go embedding engine)")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status: %s", resp.Status)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(destPath, data, 0644)
+}
 
 // EnsureModelFiles checks if the required model weights (model.safetensors and tokenizer.json)
 // exist in targetDir. If they do not exist, it automatically downloads them from Hugging Face.

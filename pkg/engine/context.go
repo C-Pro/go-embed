@@ -10,15 +10,23 @@ import (
 
 const (
 	scaleFactor = float32(0.17677669529663687) // 1.0 / sqrt(32)
+
+	DefaultWindowSize = 512
+	DefaultOverlap    = 256
 )
 
 // InferenceContext encapsulates all pre-allocated scratchpad buffers
-// needed to execute forward inference passes with 0 heap allocations.
+// needed to execute forward inference passes.
 type InferenceContext struct {
-	Model   *Model
-	UseSIMD bool
+	Model         *Model
+	UseSIMD       bool
+	WindowSize    int
+	Overlap       int
+	QueryPrefix   string
+	PassagePrefix string
 
 	RuneBuf       []rune
+	AllTokens     []int
 	InputIDs      []int
 	AttentionMask []int8
 	DPBuf         []tokenizer.DPState
@@ -37,12 +45,31 @@ type InferenceContext struct {
 	Output       []float32 // [384]
 }
 
-// NewContext creates a new InferenceContext with all buffers pre-allocated.
+// NewContext creates a new InferenceContext with default window size (512) and overlap (256).
 func NewContext(m *Model) *InferenceContext {
+	return NewContextWithOptions(m, DefaultWindowSize, DefaultOverlap, "", "")
+}
+
+// NewContextWithOptions creates a new InferenceContext with custom window size, overlap, and prefixes.
+func NewContextWithOptions(m *Model, windowSize, overlap int, queryPrefix, passagePrefix string) *InferenceContext {
+	if windowSize <= 0 || windowSize > MaxSeqLen {
+		windowSize = MaxSeqLen
+	}
+	if overlap < 0 {
+		overlap = 0
+	} else if overlap >= windowSize-2 {
+		overlap = (windowSize - 2) / 2
+	}
+
 	return &InferenceContext{
 		Model:         m,
 		UseSIMD:       HasSIMD,
+		WindowSize:    windowSize,
+		Overlap:       overlap,
+		QueryPrefix:   queryPrefix,
+		PassagePrefix: passagePrefix,
 		RuneBuf:       make([]rune, 0, 1024),
+		AllTokens:     make([]int, 0, 1024),
 		InputIDs:      make([]int, 0, MaxSeqLen),
 		AttentionMask: make([]int8, 0, MaxSeqLen),
 		DPBuf:         make([]tokenizer.DPState, 0, 2048),
@@ -66,12 +93,12 @@ type ContextPool struct {
 	pool sync.Pool
 }
 
-// NewContextPool creates a new pool of inference contexts for the given model.
-func NewContextPool(m *Model) *ContextPool {
+// NewContextPool creates a new pool of inference contexts for the given model with configured options.
+func NewContextPool(m *Model, windowSize, overlap int, queryPrefix, passagePrefix string) *ContextPool {
 	return &ContextPool{
 		pool: sync.Pool{
 			New: func() any {
-				return NewContext(m)
+				return NewContextWithOptions(m, windowSize, overlap, queryPrefix, passagePrefix)
 			},
 		},
 	}
@@ -87,72 +114,160 @@ func (cp *ContextPool) Put(ctx *InferenceContext) {
 	cp.pool.Put(ctx)
 }
 
-// Embed generates an L2-normalized 384-dimensional embedding for raw text.
-// If out is provided (must have cap >= 384), it writes directly into out without allocation.
-// If out is nil, it uses ctx.Output.
-func (ctx *InferenceContext) Embed(text string, out []float32) ([]float32, error) {
-	if out == nil {
-		out = ctx.Output
-	} else if len(out) < HiddenSize {
-		out = out[:HiddenSize]
-	}
-
-	// Zero-allocation tokenization
-	ctx.RuneBuf, ctx.InputIDs, ctx.AttentionMask = ctx.Model.Tok.EncodeIntoZeroAlloc(
+// Embed generates L2-normalized 384-dimensional embeddings for raw text across sliding windows.
+// It returns a slice of vectors, with one vector for each window.
+func (ctx *InferenceContext) Embed(text string) ([][]float32, error) {
+	ctx.RuneBuf, ctx.AllTokens = ctx.Model.Tok.EncodeRawIntoZeroAlloc(
 		text,
 		ctx.RuneBuf,
-		ctx.InputIDs,
-		ctx.AttentionMask,
+		ctx.AllTokens,
 		ctx.DPBuf,
-		MaxSeqLen,
 	)
 
-	return ctx.Forward(len(ctx.InputIDs), out), nil
+	return ctx.EmbedTokens(ctx.AllTokens), nil
 }
 
-// EmbedQuery embeds text with 'query: ' prefix.
-func (ctx *InferenceContext) EmbedQuery(text string, out []float32) ([]float32, error) {
-	if !strings.HasPrefix(text, "query: ") {
-		text = "query: " + text
+// EmbedQuery embeds text with the configured query prefix.
+func (ctx *InferenceContext) EmbedQuery(text string) ([][]float32, error) {
+	if ctx.QueryPrefix != "" && !strings.HasPrefix(text, ctx.QueryPrefix) {
+		text = ctx.QueryPrefix + text
 	}
-	return ctx.Embed(text, out)
+	return ctx.Embed(text)
 }
 
-// EmbedPassage embeds text with 'passage: ' prefix.
-func (ctx *InferenceContext) EmbedPassage(text string, out []float32) ([]float32, error) {
-	if !strings.HasPrefix(text, "passage: ") {
-		text = "passage: " + text
+// EmbedPassage embeds text with the configured passage prefix.
+func (ctx *InferenceContext) EmbedPassage(text string) ([][]float32, error) {
+	if ctx.PassagePrefix != "" && !strings.HasPrefix(text, ctx.PassagePrefix) {
+		text = ctx.PassagePrefix + text
 	}
-	return ctx.Embed(text, out)
+	return ctx.Embed(text)
 }
 
-// EmbedTokenIDs runs the forward pass given pre-computed token IDs and attention mask.
-func (ctx *InferenceContext) EmbedTokenIDs(inputIDs []int, attnMask []int8, out []float32) ([]float32, error) {
-	if len(inputIDs) == 0 {
-		return nil, fmt.Errorf("empty inputIDs")
+// EmbedTokens generates embeddings for a slice of content token IDs using sliding window chunking with overlap.
+func (ctx *InferenceContext) EmbedTokens(tokens []int) [][]float32 {
+	windowSize := ctx.WindowSize
+	if windowSize <= 0 || windowSize > MaxSeqLen {
+		windowSize = MaxSeqLen
 	}
-	if len(inputIDs) > MaxSeqLen {
-		inputIDs = inputIDs[:MaxSeqLen]
-		inputIDs[MaxSeqLen-1] = tokenizer.EOS_ID
+	maxContent := windowSize - 2
+	if maxContent <= 0 {
+		maxContent = 1
 	}
 
-	ctx.InputIDs = append(ctx.InputIDs[:0], inputIDs...)
-	if attnMask != nil {
-		ctx.AttentionMask = append(ctx.AttentionMask[:0], attnMask[:len(inputIDs)]...)
-	} else {
-		ctx.AttentionMask = ctx.AttentionMask[:0]
-		for i := 0; i < len(inputIDs); i++ {
-			ctx.AttentionMask = append(ctx.AttentionMask, 1)
+	if len(tokens) <= maxContent {
+		seqLen := len(tokens) + 2
+		if cap(ctx.InputIDs) < seqLen {
+			ctx.InputIDs = make([]int, seqLen)
+		} else {
+			ctx.InputIDs = ctx.InputIDs[:seqLen]
+		}
+		ctx.InputIDs[0] = tokenizer.BOS_ID
+		copy(ctx.InputIDs[1:seqLen-1], tokens)
+		ctx.InputIDs[seqLen-1] = tokenizer.EOS_ID
+
+		if cap(ctx.AttentionMask) < seqLen {
+			ctx.AttentionMask = make([]int8, seqLen)
+		} else {
+			ctx.AttentionMask = ctx.AttentionMask[:seqLen]
+		}
+		for i := 0; i < seqLen; i++ {
+			ctx.AttentionMask[i] = 1
+		}
+
+		vec := make([]float32, HiddenSize)
+		ctx.Forward(seqLen, vec)
+		return [][]float32{vec}
+	}
+
+	overlap := ctx.Overlap
+	if overlap < 0 {
+		overlap = 0
+	} else if overlap >= maxContent {
+		overlap = maxContent / 2
+	}
+	stride := maxContent - overlap
+	if stride <= 0 {
+		stride = 1
+	}
+
+	numChunks := (len(tokens) - overlap + stride - 1) / stride
+	if numChunks < 1 {
+		numChunks = 1
+	}
+	results := make([][]float32, 0, numChunks)
+
+	for start := 0; start < len(tokens); start += stride {
+		end := start + maxContent
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+		chunk := tokens[start:end]
+		seqLen := len(chunk) + 2
+
+		if cap(ctx.InputIDs) < seqLen {
+			ctx.InputIDs = make([]int, seqLen)
+		} else {
+			ctx.InputIDs = ctx.InputIDs[:seqLen]
+		}
+		ctx.InputIDs[0] = tokenizer.BOS_ID
+		copy(ctx.InputIDs[1:seqLen-1], chunk)
+		ctx.InputIDs[seqLen-1] = tokenizer.EOS_ID
+
+		if cap(ctx.AttentionMask) < seqLen {
+			ctx.AttentionMask = make([]int8, seqLen)
+		} else {
+			ctx.AttentionMask = ctx.AttentionMask[:seqLen]
+		}
+		for i := 0; i < seqLen; i++ {
+			ctx.AttentionMask[i] = 1
+		}
+
+		vec := make([]float32, HiddenSize)
+		ctx.Forward(seqLen, vec)
+		results = append(results, vec)
+
+		if end == len(tokens) {
+			break
 		}
 	}
 
-	if out == nil {
-		out = ctx.Output
-	} else if len(out) < HiddenSize {
-		out = out[:HiddenSize]
+	return results
+}
+
+// EmbedTokenIDs runs the forward pass given pre-computed token IDs and optional attention mask.
+// If len(inputIDs) <= MaxSeqLen, it executes directly as a single window.
+// If len(inputIDs) > MaxSeqLen, it windows across the content tokens.
+func (ctx *InferenceContext) EmbedTokenIDs(inputIDs []int, attnMask []int8) ([][]float32, error) {
+	if len(inputIDs) == 0 {
+		return nil, fmt.Errorf("empty inputIDs")
+	}
+	if len(inputIDs) <= MaxSeqLen {
+		seqLen := len(inputIDs)
+		ctx.InputIDs = append(ctx.InputIDs[:0], inputIDs...)
+		if attnMask != nil {
+			ctx.AttentionMask = append(ctx.AttentionMask[:0], attnMask[:seqLen]...)
+		} else {
+			ctx.AttentionMask = ctx.AttentionMask[:0]
+			for i := 0; i < seqLen; i++ {
+				ctx.AttentionMask = append(ctx.AttentionMask, 1)
+			}
+		}
+
+		vec := make([]float32, HiddenSize)
+		ctx.Forward(seqLen, vec)
+		return [][]float32{vec}, nil
 	}
 
-	return ctx.Forward(len(inputIDs), out), nil
+	// Strip outer BOS/EOS if already present before chunking
+	raw := inputIDs
+	if len(raw) > 0 && raw[0] == tokenizer.BOS_ID {
+		raw = raw[1:]
+	}
+	if len(raw) > 0 && raw[len(raw)-1] == tokenizer.EOS_ID {
+		raw = raw[:len(raw)-1]
+	}
+
+	return ctx.EmbedTokens(raw), nil
 }
 
 // Forward executes the transformer encoder, mean pooling, and L2 normalization.

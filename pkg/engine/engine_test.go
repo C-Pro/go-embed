@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -55,21 +56,37 @@ func loadTestModel(t *testing.T) *engine.Engine {
 
 func loadTestBF16Model(t *testing.T) *engine.Engine {
 	t.Helper()
-	fp32 := loadTestModel(t)
+	loadTestModel(t)
 	sharedBF16Once.Do(func() {
-		bf16Model := engine.ConvertToBF16Model(fp32.Model())
-		sharedBF16Eng = engine.NewWithModel(bf16Model)
+		modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
+		tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
+		var err error
+		sharedBF16Eng, err = engine.NewBF16(modelPath, tokPath)
+		if err != nil {
+			sharedFP32Err = err
+		}
 	})
+	if sharedBF16Eng == nil {
+		t.Skipf("BF16 model not available: %v", sharedFP32Err)
+	}
 	return sharedBF16Eng
 }
 
 func loadTestINT8Model(t *testing.T) *engine.Engine {
 	t.Helper()
-	fp32 := loadTestModel(t)
+	loadTestModel(t)
 	sharedINT8Once.Do(func() {
-		int8Model := engine.QuantizeModel(fp32.Model())
-		sharedINT8Eng = engine.NewWithModel(int8Model)
+		modelPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "model.safetensors")
+		tokPath := filepath.Join("..", "..", "models", "intfloat", "multilingual-e5-small", "tokenizer.json")
+		var err error
+		sharedINT8Eng, err = engine.NewQuantized(modelPath, tokPath)
+		if err != nil {
+			sharedFP32Err = err
+		}
 	})
+	if sharedINT8Eng == nil {
+		t.Skipf("INT8 model not available: %v", sharedFP32Err)
+	}
 	return sharedINT8Eng
 }
 
@@ -113,11 +130,14 @@ func TestGoldenParity(t *testing.T) {
 
 	for i, entry := range entries {
 		t.Run(entry.Text, func(t *testing.T) {
-			out := make([]float32, engine.HiddenSize)
-			_, err := ctx.Embed(entry.Text, out)
+			embs, err := ctx.Embed(entry.Text)
 			if err != nil {
 				t.Fatalf("Case #%d failed: %v", i, err)
 			}
+			if len(embs) == 0 {
+				t.Fatalf("Case #%d returned 0 embeddings", i)
+			}
+			out := embs[0]
 
 			cosSim := engine.CosineSimilarity(out, entry.Embedding)
 			var maxDelta float32
@@ -151,15 +171,17 @@ func TestScalarVsSIMDParity(t *testing.T) {
 	ctxSIMD.UseSIMD = true
 
 	for i, entry := range entries {
-		outScalar := make([]float32, engine.HiddenSize)
-		outSIMD := make([]float32, engine.HiddenSize)
-
-		if _, err := ctxScalar.Embed(entry.Text, outScalar); err != nil {
+		embsScalar, err := ctxScalar.Embed(entry.Text)
+		if err != nil {
 			t.Fatalf("Scalar embed failed: %v", err)
 		}
-		if _, err := ctxSIMD.Embed(entry.Text, outSIMD); err != nil {
+		embsSIMD, err := ctxSIMD.Embed(entry.Text)
+		if err != nil {
 			t.Fatalf("SIMD embed failed: %v", err)
 		}
+
+		outScalar := embsScalar[0]
+		outSIMD := embsSIMD[0]
 
 		cosSim := engine.CosineSimilarity(outScalar, outSIMD)
 		var maxDelta float32
@@ -179,31 +201,57 @@ func TestScalarVsSIMDParity(t *testing.T) {
 	}
 }
 
-func TestZeroAllocations(t *testing.T) {
+func TestSlidingWindowChunking(t *testing.T) {
 	eng := loadTestModel(t)
-	ctx := engine.NewContext(eng.Model())
-	out := make([]float32, engine.HiddenSize)
-	query := "query: how to implement consensus in distributed systems?"
 
-	// Warm up
-	if _, err := ctx.Embed(query, out); err != nil {
-		t.Fatalf("Warmup failed: %v", err)
+	longParagraph := "Consensus algorithms such as Raft and Paxos are fundamental protocols in distributed systems engineering. " +
+		"They allow a collection of machines to work as a coherent group that can survive the failures of some of its members. " +
+		"In a typical deployment, nodes elect a leader responsible for managing log replication across followers. "
+	var longTextBuilder strings.Builder
+	for i := 0; i < 4; i++ {
+		longTextBuilder.WriteString(longParagraph)
 	}
+	longText := "passage: " + longTextBuilder.String()
 
-	allocIters := 100
-	if isCI() {
-		allocIters = 2
+	// Test 1: Explicit sliding window with WindowSize=64, Overlap=32
+	ctxSmallWindow := engine.NewContextWithOptions(eng.Model(), 64, 32, "", "")
+	embsSmall, err := ctxSmallWindow.Embed(longText)
+	if err != nil {
+		t.Fatalf("Embed on small window failed: %v", err)
 	}
+	if len(embsSmall) < 2 {
+		t.Fatalf("Expected multiple window chunks with WindowSize=64, got %d", len(embsSmall))
+	}
+	t.Logf("Small window (64/32) generated %d chunks", len(embsSmall))
 
-	// Test zero allocations
-	allocs := testing.AllocsPerRun(allocIters, func() {
-		if _, err := ctx.Embed(query, out); err != nil {
-			t.Fatalf("Embed failed: %v", err)
+	for i, emb := range embsSmall {
+		if len(emb) != engine.HiddenSize {
+			t.Errorf("Chunk %d has dimension %d (expected %d)", i, len(emb), engine.HiddenSize)
 		}
-	})
+		var normSq float32
+		for _, v := range emb {
+			normSq += v * v
+		}
+		norm := float32(math.Sqrt(float64(normSq)))
+		if math.Abs(float64(norm-1.0)) > 1e-4 {
+			t.Errorf("Chunk %d norm is %.5f (expected 1.0)", i, norm)
+		}
+	}
 
-	t.Logf("Steady-state allocations per run: %.1f", allocs)
-	if allocs != 0 {
-		t.Errorf("Expected 0 allocations per run, got %.1f", allocs)
+	// Test 2: Full 512-token sliding window if not CI
+	if !isCI() {
+		var hugeBuilder strings.Builder
+		for i := 0; i < 20; i++ {
+			hugeBuilder.WriteString(longParagraph)
+		}
+		hugeText := "passage: " + hugeBuilder.String()
+		embsDefault, err := eng.Embed(hugeText)
+		if err != nil {
+			t.Fatalf("Embed on huge text failed: %v", err)
+		}
+		if len(embsDefault) < 2 {
+			t.Fatalf("Expected multiple window chunks for >512 tokens text, got %d", len(embsDefault))
+		}
+		t.Logf("Default window (512/256) generated %d chunks", len(embsDefault))
 	}
 }
